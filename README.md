@@ -2,14 +2,9 @@
 AIエージェントでExcelマクロを編集する為のSkills
 
 ## セットアップ手順
-For Codex (ChatGPT)
+以下のコマンドを実行し、ターミナル上で適用先を指定
 ```bash
-npx skills experimental_install nogikun/usable-xlsm --target openai
-```
-
-For Claude Code
-```bash
-npx skills experimental_install nogikun/usable-xlsm --target claude-code
+npx skills add nogikun/usable-xlsm
 ```
 
 <!--
