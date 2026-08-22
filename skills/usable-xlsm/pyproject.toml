@@ -1,0 +1,23 @@
+[project]
+name = "usable-xlsm"
+version = "0.2.0"
+description = "Production-safe VBA extraction, staged updates, and isolated Excel testing"
+readme = "README.md"
+authors = [
+    { name = "nogikun", email = "ok220075@oks.iput.ac.jp" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "antlr4-python3-runtime>=4.13.2",
+    "antlr4-vba>=0.0.67",
+    "oletools>=0.60.2",
+    "pywin32>=312",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+usable-xlsm = "usable_xlsm.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
