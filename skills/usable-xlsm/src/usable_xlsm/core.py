@@ -514,6 +514,8 @@ def update_vba(
     isolate_tests: bool = True,
     audit_log: str | Path | None = None,
     backup_keep: int = 10,
+    post_macro: str | None = None,
+    post_macro_args: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically promote a verified VBA update from a staging copy.
 
@@ -523,6 +525,9 @@ def update_vba(
     workbook = Path(workbook_path)
     if workbook.suffix.lower() not in {".xlsm", ".xlsb", ".xltm"}:
         raise ValueError(f"Output must be a macro-enabled workbook: {workbook}")
+    post_macro_name = str(post_macro or "").strip() or None
+    if post_macro_args and not post_macro_name:
+        raise ValueError("post_macro_args requires post_macro")
 
     preflight = require_authorized(
         preflight_workbook(
@@ -571,6 +576,7 @@ def update_vba(
             "modules": sorted(Path(name).name for name in requested_sources),
             "sync": sync,
             "tests_required": bool(run_test_suite and require_tests),
+            "post_macro": post_macro_name,
         },
         audit_log=audit_log,
     )
@@ -589,7 +595,10 @@ def update_vba(
                 timeout=timeout,
                 modules=module_sources,
                 sync=sync,
-                security_mode="disable",
+                post_macro=post_macro_name,
+                post_macro_args=post_macro_args or [],
+                security_mode="trusted_execute" if post_macro_name else "disable",
+                enable_events=False,
             )
             if not result.ok:
                 raise VbaUpdateError(
@@ -633,7 +642,10 @@ def update_vba(
                 status="ready_to_promote",
                 sha256_before=preflight.sha256,
                 sha256_after=staged_hash,
-                details={"tests": len(test_run.results) if test_run else None},
+                details={
+                    "tests": len(test_run.results) if test_run else None,
+                    "post_macro": post_macro_name,
+                },
                 audit_log=audit_destination,
             )
             os.replace(staging, workbook)
@@ -688,6 +700,7 @@ def update_vba(
                 "pruned_backups": len(removed_backups),
                 "backup_prune_error": prune_error,
                 "audit_finalize_error": audit_finalize_error,
+                "post_macro": post_macro_name,
             }
         )
         return report

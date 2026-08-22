@@ -105,9 +105,19 @@ def _apply_modules(project: Any, modules: dict[str, str], sync: bool) -> dict[st
     return report
 
 
-def _job_update(book: Any, job: dict[str, Any]) -> dict[str, Any]:
+def _job_update(excel: Any, book: Any, job: dict[str, Any]) -> dict[str, Any]:
     project = book.VBProject
     report = _apply_modules(project, job["modules"], bool(job.get("sync")))
+
+    # Run finalizers while the workbook is still the staging copy. This covers
+    # workbook objects that cannot be represented by .bas/.cls source, such as
+    # Form Control buttons, without opening the user's original workbook for a
+    # second in-place write.
+    post_macro = str(job.get("post_macro") or "").strip()
+    if post_macro:
+        excel.Run(f"'{book.Name}'!{post_macro}", *(job.get("post_macro_args") or []))
+        report["post_macro"] = post_macro
+
     book.Save()
     report["components"] = [
         {"name": component.Name, "type": int(component.Type)}
@@ -187,7 +197,7 @@ def _job_inspect(book: Any, job: dict[str, Any]) -> dict[str, Any]:
 
 
 _JOBS = {
-    "update": lambda excel, book, job: _job_update(book, job),
+    "update": _job_update,
     "run": _job_run,
     "run_tests": _job_run_tests,
     "inspect": lambda excel, book, job: _job_inspect(book, job),

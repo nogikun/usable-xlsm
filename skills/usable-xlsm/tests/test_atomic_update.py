@@ -99,6 +99,69 @@ class AtomicUpdateTests(unittest.TestCase):
             self.assertIn('"status": "ready_to_promote"', audit)
             self.assertIn('"status": "succeeded"', audit)
 
+    def test_post_macro_is_part_of_staged_update(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workbook = root / "book.xlsm"
+            workbook.write_bytes(b"original")
+            source = root / "src"
+            source.mkdir()
+            (source / "Module1.bas").write_text("Sub X()\nEnd Sub", encoding="utf-8")
+            captured: dict[str, object] = {}
+
+            def update_staging(action: str, target: Path, **kwargs: object) -> JobResult:
+                captured.update(kwargs)
+                Path(target).write_bytes(b"updated-with-buttons")
+                return JobResult(
+                    ok=True,
+                    data={
+                        "updated": ["Module1"],
+                        "added": [],
+                        "removed": [],
+                        "components": [{"name": "Module1", "type": 1}],
+                        "post_macro": "Module1.InstallControlButtons",
+                    },
+                )
+
+            with (
+                patch("usable_xlsm.core.preflight_workbook", return_value=self.authorized(workbook)),
+                patch("usable_xlsm.core.validate_vba_modules", return_value={"Module1.bas": "Sub X()\nEnd Sub"}),
+                patch("usable_xlsm.core.extract_vba", return_value={"Module1.bas": "Sub X()\nEnd Sub"}),
+                patch("usable_xlsm.core.check_directory", return_value=[]),
+                patch("usable_xlsm.core.run_job", side_effect=update_staging),
+                patch("usable_xlsm.core.verify_applied_modules"),
+                patch(
+                    "usable_xlsm.core.run_tests",
+                    return_value=TestRun(
+                        ok=True,
+                        results=[TestResult("Tests", "Test_X", "pass", 0.1, "")],
+                    ),
+                ),
+            ):
+                report = update_vba(
+                    source,
+                    workbook,
+                    trust_workbook=True,
+                    post_macro="Module1.InstallControlButtons",
+                )
+
+            self.assertEqual(workbook.read_bytes(), b"updated-with-buttons")
+            self.assertEqual(captured["post_macro"], "Module1.InstallControlButtons")
+            self.assertEqual(captured["security_mode"], "trusted_execute")
+            self.assertEqual(captured["enable_events"], False)
+            self.assertEqual(report["post_macro"], "Module1.InstallControlButtons")
+
+    def test_post_macro_arguments_require_a_macro(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workbook = root / "book.xlsm"
+            workbook.write_bytes(b"original")
+            source = root / "src"
+            source.mkdir()
+            (source / "Module1.bas").write_text("Sub X()\nEnd Sub", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                update_vba(source, workbook, post_macro_args=[1], trust_workbook=True)
+
     def test_restore_is_atomic_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

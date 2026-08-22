@@ -6,13 +6,15 @@ An update follows this transaction:
 
 ```text
 preflight -> source validation -> syntax check -> workbook lock -> backup
--> staging copy -> macros disabled at open -> apply -> close
+-> staging copy -> apply VBA -> optional trusted post-macro on staging -> close
 -> static re-extraction and manifest/source comparison
 -> isolated Test_* runs -> original hash recheck -> atomic replace -> audit
 ```
 
 The original is never opened by Excel for writing. A failure before atomic
-replacement leaves it unchanged. Backups live under `.usable-xlsm-backups/`;
+replacement leaves it unchanged. A `post_macro` is run only on the staging
+copy and is enabled explicitly by the caller; without one, the update worker
+opens the staging workbook with macros disabled. Backups live under `.usable-xlsm-backups/`;
 audit events live under `.usable-xlsm-audit/audit.jsonl` by default.
 
 Before replacement, the tool persists a `ready_to_promote` event containing the

@@ -141,6 +141,16 @@ def update_command(
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t"),
     audit_log: Path | None = typer.Option(None, "--audit-log", dir_okay=False),
     backup_keep: int = typer.Option(10, "--backup-keep", min=1),
+    post_macro: str | None = typer.Option(
+        None,
+        "--post-macro",
+        help="Run this trusted finalizer on the staging workbook before tests and promotion.",
+    ),
+    post_macro_arg: list[str] = typer.Option(
+        [],
+        "--post-macro-arg",
+        help="Argument for --post-macro; may be repeated and accepts JSON values.",
+    ),
 ) -> None:
     try:
         report = update_vba(
@@ -156,6 +166,8 @@ def update_command(
             timeout=timeout,
             audit_log=audit_log,
             backup_keep=backup_keep,
+            post_macro=post_macro,
+            post_macro_args=[_coerce(value) for value in post_macro_arg],
         )
     except (WorkbookSecurityError, VbaSyntaxError, ValueError, RuntimeError) as exc:
         _dump(

@@ -1,6 +1,6 @@
 ---
 name: usable-xlsm
-description: Safely inspect, edit, test, and release VBA in trusted .xlsm/.xlsb/.xltm workbooks on a dedicated Windows Excel worker. Use for VBA or macro-enabled workbook development, repair, review, regression testing, and controlled promotion. Do not use for plain .xlsx data work, arbitrary untrusted Office files, or server-side concurrent Office automation.
+description: Safely inspect, edit, test, and release VBA and workbook-object changes in trusted .xlsm/.xlsb/.xltm workbooks on a dedicated Windows Excel worker. Use for VBA or macro-enabled workbook development, repair, review, regression testing, and controlled promotion. Do not use for plain .xlsx data work, arbitrary untrusted Office files, or server-side concurrent Office automation.
 ---
 
 # usable-xlsm
@@ -65,6 +65,23 @@ uv run --project skills/usable-xlsm usable-xlsm update `
   --source work/vba --workbook book.xlsm --policy usable-xlsm.toml
 ```
 
+When the update also needs to create or modify workbook objects that are not
+represented by `.bas`/`.cls` source (for example Form Control buttons), run a
+trusted finalizer on the staging copy as part of the same transaction:
+
+```powershell
+uv run --project skills/usable-xlsm usable-xlsm update `
+  --source work/vba --workbook book.xlsm --policy usable-xlsm.toml `
+  --post-macro Module1.InstallControlButtons
+```
+
+`--post-macro` runs after the VBA source is applied and before static
+verification, isolated tests, and atomic promotion. The original workbook is
+not opened for this step, so a separate `run --in-place` command is not needed.
+Use it only for an explicitly chosen, trusted finalizer; its side effects on
+the staging copy become part of the promoted workbook. Repeated macro
+arguments can be supplied with `--post-macro-arg`.
+
 By default this requires at least one `Public Sub Test_*()`, isolates every test
 on a fresh workbook copy, and refuses promotion on any test, teardown, cleanup,
 integrity, or audit failure. `--allow-no-tests`, `--shared-test-copy`,
@@ -81,7 +98,9 @@ uv run --project skills/usable-xlsm usable-xlsm run `
 ```
 
 `run` uses a disposable copy by default. `--in-place` is an explicit exception
-for an approved interactive case, not a normal development shortcut.
+for an approved interactive case, not a normal development shortcut. Prefer
+`update --post-macro` when the macro is a deterministic part of the workbook
+release, because it keeps the finalizer inside the staged update transaction.
 
 Confirm no harness or scratch artifacts remain:
 

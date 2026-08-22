@@ -10,6 +10,8 @@ Key properties:
 - one owned Excel process on a dedicated worker;
 - staged updates with backup, re-extraction verification, isolated tests, and
   atomic promotion;
+- optional trusted post-update macros run on the staging copy, so workbook
+  objects such as buttons can be installed without a second in-place step;
 - JSON output, stable error codes, privacy-conscious JSONL audit events;
 - no broad Excel process termination;
 - MOTW, XLM, VBA stomping, signatures, UserForms, teardown failures, and cleanup
