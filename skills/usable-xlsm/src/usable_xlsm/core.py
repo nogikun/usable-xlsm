@@ -746,7 +746,7 @@ def run_macro(
     can be exercised without dirtying the workbook under development. With
     ``save=True`` that duplicate is output the caller wants to keep, so it gets
     a name outside the scratch-copy pattern - otherwise verify_clean's cleanup
-    and doctor.py --sweep would delete the very file the caller asked to keep,
+    and sweep_working_copies would delete the very file the caller asked to keep,
     since both match on the same ``*.testrun.xls*`` pattern used for the
     ephemeral copies. ``save=False`` copies are always discarded, so they get a
     unique name instead: a fixed name would collide if this ran concurrently
