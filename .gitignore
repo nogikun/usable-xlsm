@@ -1,2 +1,13 @@
 .direnv/
 .DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+.usable-xlsm-audit/
+.usable-xlsm-backups/
+*.tests.xls*
+*.testrun.xls*
+*.staging.xls*
+.*.usable-xlsm.lock

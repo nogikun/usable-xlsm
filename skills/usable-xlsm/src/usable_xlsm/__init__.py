@@ -1,0 +1,98 @@
+from .core import (
+    CleanlinessReport,
+    TestRun,
+    VbaModuleMismatchError,
+    VbaUpdateError,
+    VbaVerificationError,
+    backup_workbook,
+    list_backups,
+    prune_backups,
+    restore_workbook,
+    mark_of_the_web,
+    check_syntax,
+    discard_working_copy,
+    sweep_working_copies,
+    verify_clean,
+    extract_vba,
+    inspect_workbook,
+    run_macro,
+    run_tests,
+    update_vba,
+    validate_vba_modules,
+)
+from .security import (
+    PreflightReport,
+    SecurityFinding,
+    TrustPolicy,
+    WorkbookSecurityError,
+    preflight_workbook,
+    require_authorized,
+    sha256_file,
+)
+from .locking import LockBusyError
+from .support import create_support_bundle
+from ._version import __version__
+from .runner import DEFAULT_TIMEOUT, ExcelJobError, JobResult, excel_pids, run_job
+from .testing import (
+    TEST_PREFIX,
+    Discovery,
+    TestCase,
+    TestResult,
+    discover,
+)
+from .syntax import VBA_SUFFIXES, SyntaxIssue, VbaSyntaxError, check_directory, check_file
+
+__all__ = [
+    "DEFAULT_TIMEOUT",
+    "ExcelJobError",
+    "JobResult",
+    "SyntaxIssue",
+    "VBA_SUFFIXES",
+    "VbaModuleMismatchError",
+    "VbaSyntaxError",
+    "VbaUpdateError",
+    "VbaVerificationError",
+    "WorkbookSecurityError",
+    "PreflightReport",
+    "SecurityFinding",
+    "TrustPolicy",
+    "LockBusyError",
+    "create_support_bundle",
+    "__version__",
+    "CleanlinessReport",
+    "backup_workbook",
+    "list_backups",
+    "prune_backups",
+    "restore_workbook",
+    "mark_of_the_web",
+    "preflight_workbook",
+    "require_authorized",
+    "sha256_file",
+    "discard_working_copy",
+    "sweep_working_copies",
+    "verify_clean",
+    "check_directory",
+    "check_file",
+    "check_syntax",
+    "excel_pids",
+    "extract_vba",
+    "inspect_workbook",
+    "main",
+    "run_job",
+    "Discovery",
+    "TEST_PREFIX",
+    "TestCase",
+    "TestResult",
+    "TestRun",
+    "discover",
+    "run_macro",
+    "run_tests",
+    "update_vba",
+    "validate_vba_modules",
+]
+
+
+def main() -> None:
+    from .cli import main as cli_main
+
+    cli_main()
