@@ -95,6 +95,8 @@ class AtomicUpdateTests(unittest.TestCase):
             self.assertNotEqual(report["sha256_before"], report["sha256_after"])
             self.assertTrue(Path(report["backup"]).is_file())
             self.assertTrue(Path(report["audit_log"]).is_file())
+            self.assertEqual(report["test_mode"], "isolated")
+            self.assertEqual(report["excel_jobs"], 2)
             audit = Path(report["audit_log"]).read_text(encoding="utf-8")
             self.assertIn('"status": "ready_to_promote"', audit)
             self.assertIn('"status": "succeeded"', audit)
@@ -161,6 +163,50 @@ class AtomicUpdateTests(unittest.TestCase):
             (source / "Module1.bas").write_text("Sub X()\nEnd Sub", encoding="utf-8")
             with self.assertRaises(ValueError):
                 update_vba(source, workbook, post_macro_args=[1], trust_workbook=True)
+
+    def test_button_only_update_uses_one_staged_worker_job(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workbook = root / "book.xlsm"
+            workbook.write_bytes(b"original")
+            captured: dict[str, object] = {}
+
+            def update_staging(action: str, target: Path, **kwargs: object) -> JobResult:
+                captured.update(kwargs)
+                Path(target).write_bytes(b"updated-with-button")
+                return JobResult(
+                    ok=True,
+                    data={
+                        "updated": [],
+                        "added": [],
+                        "removed": [],
+                        "buttons": [{"name": "btnRun"}],
+                        "components": [],
+                    },
+                )
+
+            with (
+                patch("usable_xlsm.core.preflight_workbook", return_value=self.authorized(workbook)),
+                patch("usable_xlsm.core.run_job", side_effect=update_staging),
+                patch("usable_xlsm.core.verify_saved_buttons", return_value=[]),
+                patch("usable_xlsm.core.verify_button_macros"),
+            ):
+                report = update_vba(
+                    None,
+                    workbook,
+                    trust_workbook=True,
+                    run_test_suite=False,
+                    button_specs=[
+                        {"sheet": "Sheet1", "name": "btnRun", "macro": "Module1.Run"}
+                    ],
+                )
+
+            self.assertEqual(workbook.read_bytes(), b"updated-with-button")
+            self.assertEqual(captured["modules"], {})
+            self.assertEqual(len(captured["buttons"]), 1)
+            self.assertEqual(report["buttons"][0]["name"], "btnRun")
+            self.assertEqual(report["test_mode"], None)
+            self.assertEqual(report["excel_jobs"], 1)
 
     def test_restore_is_atomic_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

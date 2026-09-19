@@ -105,20 +105,259 @@ def _apply_modules(project: Any, modules: dict[str, str], sync: bool) -> dict[st
     return report
 
 
+def _collection_item(collection: Any, name: str) -> Any | None:
+    try:
+        return collection.Item(name)
+    except Exception:
+        try:
+            return collection(name)
+        except Exception:
+            return None
+
+
+def _worksheet(book: Any, name: str) -> Any | None:
+    worksheets = getattr(book, "Worksheets")
+    try:
+        return worksheets(name) if callable(worksheets) else worksheets.Item(name)
+    except Exception:
+        try:
+            return worksheets.Item(name)
+        except Exception:
+            return None
+
+
+def _apply_worksheets(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    worksheets = getattr(book, "Worksheets")
+    visibility = {"visible": -1, "hidden": 0, "veryHidden": 2}
+    applied: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["name"])
+        created = False
+        if sheet is None:
+            if not spec["create"]:
+                raise ValueError(f"Worksheet {spec['name']} does not exist; set create=true to add it")
+            try:
+                count = int(worksheets.Count)
+                after = worksheets.Item(count)
+                sheet = worksheets.Add(After=after)
+            except Exception as exc:
+                raise ValueError(f"Could not create worksheet {spec['name']}: {exc}") from exc
+            sheet.Name = spec["name"]
+            created = True
+        sheet.Visible = visibility[spec["visible"]]
+        applied.append({"name": str(sheet.Name), "visible": spec["visible"], "created": created})
+    return applied
+
+
+def _range_is_nonempty(cell: Any) -> bool:
+    try:
+        formula = str(getattr(cell, "Formula") or "").strip()
+        if formula:
+            return True
+    except Exception:
+        pass
+    try:
+        value = getattr(cell, "Value")
+    except Exception:
+        value = None
+    return value not in (None, "")
+
+
+def _apply_cells(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    applied: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["sheet"])
+        if sheet is None:
+            raise ValueError(f"Worksheet {spec['sheet']} does not exist for cell {spec['address']}")
+        cell = sheet.Range(spec["address"])
+        if not spec["overwrite"] and _range_is_nonempty(cell):
+            raise ValueError(
+                f"Cell {spec['sheet']}!{spec['address']} is not empty; set overwrite=true to replace it"
+            )
+        if spec["formula"] is not None:
+            cell.Formula = spec["formula"]
+        else:
+            cell.Value = spec["value"]
+        if spec["number_format"] is not None:
+            cell.NumberFormat = spec["number_format"]
+        applied.append(
+            {
+                "sheet": spec["sheet"],
+                "address": spec["address"],
+                "formula": spec["formula"],
+                "value": spec["value"] if spec["formula"] is None else None,
+                "number_format": spec["number_format"],
+            }
+        )
+    return applied
+
+
+def _verify_worksheets(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visibility = {"visible": -1, "hidden": 0, "veryHidden": 2}
+    verified: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["name"])
+        if sheet is None:
+            raise ValueError(f"Worksheet {spec['name']} was not found after save")
+        actual = int(sheet.Visible)
+        if actual != visibility[spec["visible"]]:
+            raise ValueError(
+                f"Worksheet {spec['name']} visibility mismatch: "
+                f"expected={spec['visible']!r}, actual={actual}"
+            )
+        verified.append({"name": spec["name"], "verified": True})
+    return verified
+
+
+def _verify_cells(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    verified: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["sheet"])
+        if sheet is None:
+            raise ValueError(f"Worksheet {spec['sheet']} was not found after save")
+        cell = sheet.Range(spec["address"])
+        if spec["formula"] is not None:
+            actual_formula = str(getattr(cell, "Formula") or "")
+            if actual_formula != spec["formula"]:
+                raise ValueError(
+                    f"Cell {spec['sheet']}!{spec['address']} formula mismatch: "
+                    f"expected={spec['formula']!r}, actual={actual_formula!r}"
+                )
+        else:
+            actual = getattr(cell, "Value")
+            expected = spec["value"]
+            if isinstance(expected, bool):
+                matches = actual is expected
+            elif isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                try:
+                    matches = abs(float(actual) - float(expected)) < 1e-9
+                except (TypeError, ValueError):
+                    matches = False
+            else:
+                matches = actual == expected
+            if not matches:
+                raise ValueError(
+                    f"Cell {spec['sheet']}!{spec['address']} value mismatch: "
+                    f"expected={expected!r}, actual={actual!r}"
+                )
+        if spec["number_format"] is not None:
+            actual_format = str(getattr(cell, "NumberFormat") or "")
+            if actual_format != spec["number_format"]:
+                raise ValueError(
+                    f"Cell {spec['sheet']}!{spec['address']} number format mismatch: "
+                    f"expected={spec['number_format']!r}, actual={actual_format!r}"
+                )
+        verified.append({"sheet": spec["sheet"], "address": spec["address"], "verified": True})
+    return verified
+
+
+def _worksheet_buttons(sheet: Any) -> Any:
+    buttons = getattr(sheet, "Buttons")
+    return buttons() if callable(buttons) else buttons
+
+
+def _apply_buttons(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    applied: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["sheet"])
+        if sheet is None:
+            raise ValueError(f"Worksheet {spec['sheet']} does not exist for button {spec['name']}")
+        buttons = _worksheet_buttons(sheet)
+        existing = _collection_item(buttons, spec["name"])
+        replaced = False
+        if existing is not None:
+            if not spec["replace"]:
+                raise ValueError(
+                    f"Button {spec['name']} already exists on sheet {spec['sheet']}; "
+                    "set replace=true to replace it."
+                )
+            existing.Delete()
+            replaced = True
+
+        button = buttons.Add(
+            spec["left"],
+            spec["top"],
+            spec["width"],
+            spec["height"],
+        )
+        button.Name = spec["name"]
+        button.Caption = spec["caption"]
+        button.OnAction = spec["macro"]
+        applied.append(
+            {
+                "sheet": spec["sheet"],
+                "name": str(button.Name),
+                "caption": spec["caption"],
+                "macro": spec["macro"],
+                "left": spec["left"],
+                "top": spec["top"],
+                "width": spec["width"],
+                "height": spec["height"],
+                "replaced": replaced,
+            }
+        )
+    return applied
+
+
+def _verify_buttons(book: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    verified: list[dict[str, Any]] = []
+    for spec in specs:
+        sheet = _worksheet(book, spec["sheet"])
+        if sheet is None:
+            raise ValueError(f"Worksheet {spec['sheet']} does not exist for button {spec['name']}")
+        button = _collection_item(_worksheet_buttons(sheet), spec["name"])
+        if button is None:
+            raise ValueError(f"Button {spec['name']} was not found after save")
+        expected_fields = {"Name": "name", "Caption": "caption", "OnAction": "macro"}
+        for field, spec_field in expected_fields.items():
+            expected = spec[spec_field]
+            if str(getattr(button, field)) != str(expected):
+                raise ValueError(
+                    f"Button {spec['name']} {field} mismatch after save: "
+                    f"expected={expected!r}, actual={getattr(button, field)!r}"
+                )
+        for field in ("Left", "Top", "Width", "Height"):
+            expected = float(spec[field.lower()])
+            actual = float(getattr(button, field))
+            # Excel stores shape geometry in point/column units and rounds the
+            # requested values on save.  A one-point tolerance validates the
+            # persisted placement without rejecting normal COM round-off.
+            if abs(actual - expected) > 1.0:
+                raise ValueError(
+                    f"Button {spec['name']} {field} mismatch after save: "
+                    f"expected={expected}, actual={actual}"
+                )
+        verified.append({"sheet": spec["sheet"], "name": spec["name"], "verified": True})
+    return verified
+
+
 def _job_update(excel: Any, book: Any, job: dict[str, Any]) -> dict[str, Any]:
     project = book.VBProject
-    report = _apply_modules(project, job["modules"], bool(job.get("sync")))
+    report: dict[str, Any] = {"updated": [], "added": [], "removed": []}
+    if job.get("modules"):
+        report.update(_apply_modules(project, job["modules"], bool(job.get("sync"))))
+    if job.get("worksheets"):
+        report["worksheets"] = _apply_worksheets(book, job["worksheets"])
+    if job.get("cells"):
+        report["cells"] = _apply_cells(book, job["cells"])
+    if job.get("buttons"):
+        report["buttons"] = _apply_buttons(book, job["buttons"])
 
     # Run finalizers while the workbook is still the staging copy. This covers
-    # workbook objects that cannot be represented by .bas/.cls source, such as
-    # Form Control buttons, without opening the user's original workbook for a
-    # second in-place write.
+    # trusted workbook objects that are outside the declarative script contract
+    # without opening the user's original workbook for a second in-place write.
     post_macro = str(job.get("post_macro") or "").strip()
     if post_macro:
         excel.Run(f"'{book.Name}'!{post_macro}", *(job.get("post_macro_args") or []))
         report["post_macro"] = post_macro
 
     book.Save()
+    if job.get("worksheets"):
+        report["worksheets_verified"] = _verify_worksheets(book, job["worksheets"])
+    if job.get("cells"):
+        report["cells_verified"] = _verify_cells(book, job["cells"])
+    if job.get("buttons"):
+        report["buttons_verified"] = _verify_buttons(book, job["buttons"])
     report["components"] = [
         {"name": component.Name, "type": int(component.Type)}
         for component in project.VBComponents
@@ -209,6 +448,22 @@ def main() -> int:
     pid_path = job.get("pid_file")
     job_id = str(job.get("job_id") or "")
     workbook = str(Path(job["workbook"]).resolve())
+
+    if sys.platform != "win32":
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "job_id": job_id,
+                    "error_code": "excel_backend_unavailable",
+                    "error": (
+                        "Excel COM automation is only supported on Windows; "
+                        "use the macOS manual backend for manifest/source validation."
+                    ),
+                }
+            )
+        )
+        return 1
 
     import win32com.client
 

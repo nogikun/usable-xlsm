@@ -7,13 +7,15 @@ An update follows this transaction:
 ```text
 preflight -> source validation -> syntax check -> workbook lock -> backup
 -> staging copy -> apply VBA -> optional trusted post-macro on staging -> close
--> static re-extraction and manifest/source comparison
+-> static re-extraction, worksheet/cell/button package verification, and manifest/source comparison
 -> isolated Test_* runs -> original hash recheck -> atomic replace -> audit
 ```
 
 The original is never opened by Excel for writing. A failure before atomic
-replacement leaves it unchanged. A `post_macro` is run only on the staging
-copy and is enabled explicitly by the caller; without one, the update worker
+replacement leaves it unchanged. Failures during preflight or input validation
+may occur before a backup is created; they still leave the original unchanged
+and emit a failed audit event when an audit destination is available. A
+`post_macro` is run only on the staging copy and is enabled explicitly by the caller; without one, the update worker
 opens the staging workbook with macros disabled. Backups live under `.usable-xlsm-backups/`;
 audit events live under `.usable-xlsm-audit/audit.jsonl` by default.
 
@@ -24,6 +26,15 @@ can be changed with `--backup-keep`.
 
 `restore` copies a backup to a new staging file and atomically replaces the
 target while holding the workbook lock.
+
+## Development versus release
+
+The release transaction is intentionally more expensive than an edit loop.
+During development, apply to a disposable copy with `--no-test`, then run one
+known smoke macro or one filtered `Test_*` case on that copy. The apply itself
+still uses real Excel and performs save/close/package checks. Run the complete
+isolated suite only for release or handoff; do not make every edit pay for
+unrelated tests.
 
 ## Queue and recovery
 

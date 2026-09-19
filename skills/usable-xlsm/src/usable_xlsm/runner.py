@@ -32,6 +32,23 @@ DEFAULT_TIMEOUT = 60.0
 
 # How often to look for a blocking dialog while the worker runs.
 DIALOG_POLL_INTERVAL = 0.75
+# Excel can remain visible to tasklist briefly after Application.Quit returns.
+# Wait only for the PID owned by this worker before allowing the next job.
+WORKER_EXIT_GRACE = 10.0
+
+
+def excel_backend_error() -> str | None:
+    """Return why Excel COM automation is unavailable, or ``None`` if ready."""
+    if sys.platform != "win32":
+        return (
+            "Excel COM automation is only supported on Windows; "
+            "use the macOS manual backend for manifest/source validation."
+        )
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        return "pywin32 is required for the Windows Excel COM backend."
+    return None
 
 
 class ExcelJobError(RuntimeError):
@@ -148,6 +165,16 @@ def find_stray_excel(before: set[int]) -> set[int]:
 def excel_pids() -> set[int]:
     """PIDs of every Excel process currently running."""
     return find_stray_excel(set())
+
+
+def _wait_for_excel_exit(pid: int, timeout: float = WORKER_EXIT_GRACE) -> bool:
+    """Wait for one worker-owned Excel PID to disappear from tasklist."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid not in excel_pids():
+            return True
+        time.sleep(0.25)
+    return pid not in excel_pids()
 
 
 def _run_job_unlocked(
@@ -297,8 +324,22 @@ def _run_job_unlocked(
             ),
         )
 
+    owned_excel_pid = read_excel_pid()
     discard_pid_file()
     duration = time.monotonic() - started
+
+    if owned_excel_pid is not None and not _wait_for_excel_exit(owned_excel_pid):
+        return JobResult(
+            ok=False,
+            error=(
+                f"Owned Excel process {owned_excel_pid} did not exit after the "
+                f"worker completed within {WORKER_EXIT_GRACE:g}s."
+            ),
+            duration=duration,
+            job_id=job_id,
+            excel_pid=owned_excel_pid,
+            error_code="excel_cleanup_failed",
+        )
 
     if "exception" in transfer:
         return JobResult(
@@ -369,6 +410,14 @@ def run_job(
 ) -> JobResult:
     """Run one owned Excel job while holding the host-wide serialization lock."""
     job_id = str(fields.pop("job_id", uuid.uuid4().hex))
+    backend_error = excel_backend_error()
+    if backend_error:
+        return JobResult(
+            ok=False,
+            error=backend_error,
+            error_code="excel_backend_unavailable",
+            job_id=job_id,
+        )
     try:
         with excel_host_lock(job_id):
             return _run_job_unlocked(

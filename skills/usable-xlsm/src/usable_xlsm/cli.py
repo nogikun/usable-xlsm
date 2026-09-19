@@ -10,6 +10,7 @@ from typing import Any
 import typer
 
 from .core import (
+    apply_script,
     check_syntax,
     extract_vba,
     restore_workbook,
@@ -129,15 +130,23 @@ def check_command(
 
 @app.command("update")
 def update_command(
-    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    source: Path | None = typer.Option(None, "--source", "-s", exists=True, file_okay=False),
     workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
     trust_workbook: bool = typer.Option(False, "--trust-workbook"),
     policy: Path | None = typer.Option(None, "--policy", exists=True, dir_okay=False),
     sync: bool = typer.Option(False, "--sync"),
     allow_signature_removal: bool = typer.Option(False, "--allow-signature-removal"),
-    test: bool = typer.Option(True, "--test/--no-test"),
+    test: bool = typer.Option(
+        True,
+        "--test/--no-test",
+        help="Run workbook Test_* procedures; use --no-test for disposable development iterations.",
+    ),
     require_tests: bool = typer.Option(True, "--require-tests/--allow-no-tests"),
-    isolate_tests: bool = typer.Option(True, "--isolate-tests/--shared-test-copy"),
+    isolate_tests: bool = typer.Option(
+        True,
+        "--isolate-tests/--shared-test-copy",
+        help="Use fresh copies for release isolation; shared copy is a development speed exception.",
+    ),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t"),
     audit_log: Path | None = typer.Option(None, "--audit-log", dir_okay=False),
     backup_keep: int = typer.Option(10, "--backup-keep", min=1),
@@ -151,8 +160,38 @@ def update_command(
         "--post-macro-arg",
         help="Argument for --post-macro; may be repeated and accepts JSON values.",
     ),
+    buttons: Path | None = typer.Option(
+        None,
+        "--buttons",
+        exists=True,
+        dir_okay=False,
+        help="JSON button manifest; can be used with or without --source.",
+    ),
+    worksheets: Path | None = typer.Option(
+        None,
+        "--worksheets",
+        exists=True,
+        dir_okay=False,
+        help="JSON worksheet manifest; can be used with or without --source.",
+    ),
+    cells: Path | None = typer.Option(
+        None,
+        "--cells",
+        exists=True,
+        dir_okay=False,
+        help="JSON cell manifest; can be used with or without --source.",
+    ),
 ) -> None:
     try:
+        button_specs = None
+        if buttons is not None:
+            button_specs = json.loads(buttons.read_text(encoding="utf-8"))
+        worksheet_specs = None
+        if worksheets is not None:
+            worksheet_specs = json.loads(worksheets.read_text(encoding="utf-8"))
+        cell_specs = None
+        if cells is not None:
+            cell_specs = json.loads(cells.read_text(encoding="utf-8"))
         report = update_vba(
             source,
             workbook,
@@ -168,8 +207,61 @@ def update_command(
             backup_keep=backup_keep,
             post_macro=post_macro,
             post_macro_args=[_coerce(value) for value in post_macro_arg],
+            button_specs=button_specs,
+            worksheet_specs=worksheet_specs,
+            cell_specs=cell_specs,
         )
-    except (WorkbookSecurityError, VbaSyntaxError, ValueError, RuntimeError) as exc:
+    except (WorkbookSecurityError, VbaSyntaxError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        _dump(
+            {
+                "ok": False,
+                "error": str(exc),
+                "error_code": getattr(exc, "error_code", type(exc).__name__),
+            }
+        )
+        raise typer.Exit(code=2 if isinstance(exc, WorkbookSecurityError) else 1) from exc
+    _dump({"ok": True, **report})
+
+
+@app.command("apply")
+def apply_command(
+    script: Path = typer.Option(..., "--script", "-s", exists=True, dir_okay=False),
+    workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
+    trust_workbook: bool = typer.Option(False, "--trust-workbook"),
+    policy: Path | None = typer.Option(None, "--policy", exists=True, dir_okay=False),
+    allow_signature_removal: bool = typer.Option(False, "--allow-signature-removal"),
+    test: bool = typer.Option(
+        True,
+        "--test/--no-test",
+        help="Run workbook Test_* procedures; use --no-test for disposable development iterations.",
+    ),
+    require_tests: bool = typer.Option(True, "--require-tests/--allow-no-tests"),
+    isolate_tests: bool = typer.Option(
+        True,
+        "--isolate-tests/--shared-test-copy",
+        help="Use fresh copies for release isolation; shared copy is a development speed exception.",
+    ),
+    timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t"),
+    audit_log: Path | None = typer.Option(None, "--audit-log", dir_okay=False),
+    backup_keep: int = typer.Option(10, "--backup-keep", min=1),
+) -> None:
+    try:
+        payload = json.loads(script.read_text(encoding="utf-8"))
+        report = apply_script(
+            payload,
+            workbook,
+            script_dir=script.parent,
+            trust_workbook=trust_workbook,
+            policy_path=policy,
+            allow_signature_removal=allow_signature_removal,
+            run_test_suite=test,
+            require_tests=require_tests,
+            isolate_tests=isolate_tests,
+            timeout=timeout,
+            audit_log=audit_log,
+            backup_keep=backup_keep,
+        )
+    except (WorkbookSecurityError, VbaSyntaxError, ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
         _dump(
             {
                 "ok": False,

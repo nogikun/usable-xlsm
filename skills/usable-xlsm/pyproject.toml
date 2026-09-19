@@ -11,7 +11,7 @@ dependencies = [
     "antlr4-python3-runtime>=4.13.2",
     "antlr4-vba>=0.0.67",
     "oletools>=0.60.2",
-    "pywin32>=312",
+    "pywin32>=312; sys_platform == 'win32'",
     "typer>=0.27.1",
 ]
 

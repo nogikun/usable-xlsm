@@ -365,7 +365,7 @@ dependencies = [
     { name = "antlr4-python3-runtime" },
     { name = "antlr4-vba" },
     { name = "oletools" },
-    { name = "pywin32" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "typer" },
 ]
 
@@ -374,7 +374,7 @@ requires-dist = [
     { name = "antlr4-python3-runtime", specifier = ">=4.13.2" },
     { name = "antlr4-vba", specifier = ">=0.0.67" },
     { name = "oletools", specifier = ">=0.60.2" },
-    { name = "pywin32", specifier = ">=312" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=312" },
     { name = "typer", specifier = ">=0.27.1" },
 ]
 

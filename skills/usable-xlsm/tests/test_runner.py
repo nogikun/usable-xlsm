@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from usable_xlsm.runner import _kill
+from usable_xlsm.runner import _kill, _wait_for_excel_exit
 
 
 class RunnerSafetyTests(unittest.TestCase):
@@ -18,6 +18,13 @@ class RunnerSafetyTests(unittest.TestCase):
         with patch("usable_xlsm.runner.subprocess.run") as run:
             _kill(1234, tree=True)
         self.assertIn("/T", run.call_args.args[0])
+
+    def test_waits_only_for_owned_excel_to_exit(self) -> None:
+        with (
+            patch("usable_xlsm.runner.excel_pids", side_effect=[{1234}, set()]),
+            patch("usable_xlsm.runner.time.sleep"),
+        ):
+            self.assertTrue(_wait_for_excel_exit(1234, timeout=1))
 
 
 if __name__ == "__main__":
