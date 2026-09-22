@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import math
 import os
 from pathlib import Path
+import posixpath
+import re
 import shutil
+import tempfile
 import time
 from typing import Any
 import uuid
+import zipfile
+import xml.etree.ElementTree as ET
 
 from oletools.olevba import VBA_Parser
 
@@ -133,6 +139,492 @@ def validate_vba_modules(
         name: path.read_text(encoding="utf-8")
         for name, path in sorted(source_files.items())
     }
+
+
+def normalize_button_specs(specs: Any) -> list[dict[str, Any]]:
+    """Validate and normalize declarative Form Control button specifications."""
+    if isinstance(specs, dict):
+        specs = specs.get("buttons")
+    if not isinstance(specs, list) or not specs:
+        raise ValueError("Button specification must contain a non-empty 'buttons' list")
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def text(value: Any, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Button {field} must be a non-empty string")
+        return value.strip()
+
+    def number(value: Any, field: str, default: float) -> float:
+        if value is None:
+            value = default
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Button {field} must be a finite number")
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Button {field} must be a finite non-negative number")
+        return value
+
+    for index, raw in enumerate(specs):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Button specification {index} must be an object")
+        sheet = text(raw.get("sheet"), "sheet")
+        name = text(raw.get("name"), "name")
+        macro = text(raw.get("macro"), "macro")
+        key = (sheet, name)
+        if key in seen:
+            raise ValueError(f"Duplicate button {name} on sheet {sheet}")
+        seen.add(key)
+        replace = raw.get("replace", False)
+        if not isinstance(replace, bool):
+            raise ValueError("Button replace must be true or false")
+        normalized.append(
+            {
+                "sheet": sheet,
+                "name": name,
+                "caption": text(raw.get("caption", name), "caption"),
+                "macro": macro,
+                "left": number(raw.get("left"), "left", 10),
+                "top": number(raw.get("top"), "top", 10),
+                "width": number(raw.get("width"), "width", 120),
+                "height": number(raw.get("height"), "height", 24),
+                "replace": replace,
+            }
+        )
+    return normalized
+
+
+def _required_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _validate_sheet_name(value: Any) -> str:
+    name = _required_text(value, "Worksheet name")
+    if len(name) > 31 or any(char in name for char in ':\\/?*[]'):
+        raise ValueError(f"Invalid worksheet name: {name!r}")
+    return name
+
+
+def normalize_worksheet_specs(specs: Any) -> list[dict[str, Any]]:
+    """Validate declarative worksheet creation/visibility requests."""
+    if isinstance(specs, dict):
+        specs = specs.get("worksheets")
+    if specs is None:
+        return []
+    if not isinstance(specs, list):
+        raise ValueError("Worksheet specification must be a list")
+    allowed = {"name", "create", "visible"}
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(specs):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Worksheet specification {index} must be an object")
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError(f"Worksheet {index} has unsupported key(s): {', '.join(unknown)}")
+        name = _validate_sheet_name(raw.get("name"))
+        key = name.casefold()
+        if key in seen:
+            raise ValueError(f"Duplicate worksheet {name}")
+        seen.add(key)
+        create = raw.get("create", False)
+        if not isinstance(create, bool):
+            raise ValueError("Worksheet create must be true or false")
+        visible = raw.get("visible", "visible")
+        if visible not in {"visible", "hidden", "veryHidden"}:
+            raise ValueError("Worksheet visible must be visible, hidden, or veryHidden")
+        normalized.append({"name": name, "create": create, "visible": visible})
+    return normalized
+
+
+def normalize_cell_specs(specs: Any) -> list[dict[str, Any]]:
+    """Validate declarative single-cell values/formulas and number formats."""
+    if isinstance(specs, dict):
+        specs = specs.get("cells")
+    if specs is None:
+        return []
+    if not isinstance(specs, list):
+        raise ValueError("Cell specification must be a list")
+    allowed = {"sheet", "address", "value", "formula", "number_format", "overwrite"}
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(specs):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Cell specification {index} must be an object")
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError(f"Cell {index} has unsupported key(s): {', '.join(unknown)}")
+        sheet = _validate_sheet_name(raw.get("sheet"))
+        address = _required_text(raw.get("address"), "Cell address")
+        if not re.fullmatch(r"\$?[A-Za-z]{1,3}\$?[1-9][0-9]*", address):
+            raise ValueError(f"Cell address must be a single A1 reference: {address!r}")
+        address = address.upper()
+        key = (sheet.casefold(), address.replace("$", ""))
+        if key in seen:
+            raise ValueError(f"Duplicate cell {sheet}!{address}")
+        seen.add(key)
+        has_value = "value" in raw
+        has_formula = raw.get("formula") is not None
+        if has_value and has_formula:
+            raise ValueError(f"Cell {sheet}!{address} must contain exactly one of value or formula")
+        if not has_value and not has_formula:
+            raise ValueError(f"Cell {sheet}!{address} must contain exactly one of value or formula")
+        value = raw.get("value")
+        if has_value and not (value is None or isinstance(value, (str, int, float, bool))):
+            raise ValueError(f"Cell {sheet}!{address} value must be null, text, number, or boolean")
+        formula = raw.get("formula")
+        if has_formula and (not isinstance(formula, str) or not formula.strip().startswith("=")):
+            raise ValueError(f"Cell {sheet}!{address} formula must be an Excel formula beginning with =")
+        number_format = raw.get("number_format")
+        if number_format is not None and not isinstance(number_format, str):
+            raise ValueError(f"Cell {sheet}!{address} number_format must be a string")
+        overwrite = raw.get("overwrite", True)
+        if not isinstance(overwrite, bool):
+            raise ValueError(f"Cell {sheet}!{address} overwrite must be true or false")
+        normalized_item = {
+            "sheet": sheet,
+            "address": address,
+            "formula": formula.strip() if isinstance(formula, str) else None,
+            "number_format": number_format,
+            "overwrite": overwrite,
+        }
+        if has_formula:
+            normalized_item.pop("formula", None)
+            normalized_item["formula"] = formula.strip()
+        else:
+            normalized_item["value"] = value
+        normalized.append(normalized_item)
+    return normalized
+
+
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_VML_NS = "urn:schemas-microsoft-com:vml"
+_EXCEL_NS = "urn:schemas-microsoft-com:office:excel"
+
+
+def _package_target(base: str, target: str) -> str:
+    """Resolve an OOXML relationship target to a package member name."""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(base), target))
+
+
+def _style_points(style: str, key: str) -> float | None:
+    match = re.search(rf"(?:^|;)\s*{re.escape(key)}\s*:\s*([-+]?\d+(?:\.\d+)?)pt", style, re.I)
+    return float(match.group(1)) if match else None
+
+
+def _normalise_saved_macro(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"^\[[^]]+\]!", "", value)
+    return value.strip("'")
+
+
+def _saved_sheet_targets(package: zipfile.ZipFile) -> tuple[dict[str, str], dict[str, str]]:
+    workbook = ET.fromstring(package.read("xl/workbook.xml"))
+    workbook_rels = ET.fromstring(package.read("xl/_rels/workbook.xml.rels"))
+    rel_targets = {
+        rel.attrib["Id"]: _package_target("xl/workbook.xml", rel.attrib["Target"])
+        for rel in workbook_rels.findall(f"{{{_REL_NS}}}Relationship")
+    }
+    targets: dict[str, str] = {}
+    states: dict[str, str] = {}
+    for sheet in workbook.findall(f"{{{_MAIN_NS}}}sheets/{{{_MAIN_NS}}}sheet"):
+        name = sheet.attrib["name"]
+        workbook_target = rel_targets.get(sheet.attrib[f"{{{_OFFICE_REL_NS}}}id"])
+        if not workbook_target:
+            continue
+        targets[name] = workbook_target
+        states[name] = sheet.attrib.get("state", "visible")
+    return targets, states
+
+
+def _saved_vml_by_sheet(package: zipfile.ZipFile) -> dict[str, ET.Element]:
+    targets, _ = _saved_sheet_targets(package)
+    result: dict[str, ET.Element] = {}
+    for name, workbook_target in targets.items():
+        rel_path = posixpath.join(
+            posixpath.dirname(workbook_target),
+            "_rels",
+            posixpath.basename(workbook_target) + ".rels",
+        )
+        if rel_path not in package.namelist():
+            continue
+        relationships = ET.fromstring(package.read(rel_path))
+        for rel in relationships.findall(f"{{{_REL_NS}}}Relationship"):
+            if not rel.attrib.get("Type", "").endswith("/vmlDrawing"):
+                continue
+            vml_target = _package_target(workbook_target, rel.attrib["Target"])
+            if vml_target in package.namelist():
+                result[name] = ET.fromstring(package.read(vml_target))
+                break
+    return result
+
+
+def _saved_cell_value(
+    cell: ET.Element | None,
+    shared_strings: list[str],
+) -> tuple[str | None, Any]:
+    if cell is None:
+        return None, None
+    formula_node = cell.find(f"{{{_MAIN_NS}}}f")
+    formula = "=" + "".join(formula_node.itertext()).strip() if formula_node is not None else None
+    value_node = cell.find(f"{{{_MAIN_NS}}}v")
+    raw = "".join(value_node.itertext()) if value_node is not None else ""
+    cell_type = cell.attrib.get("t")
+    if cell_type == "s" and raw:
+        value: Any = shared_strings[int(raw)]
+    elif cell_type == "inlineStr":
+        value = "".join(cell.itertext())
+    elif cell_type == "b":
+        value = raw == "1"
+    elif raw == "":
+        value = None
+    else:
+        try:
+            value = float(raw)
+            if value.is_integer():
+                value = int(value)
+        except ValueError:
+            value = raw
+    return formula, value
+
+
+def verify_saved_workbook_objects(
+    workbook_path: str | Path,
+    worksheet_specs: list[dict[str, Any]],
+    cell_specs: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Verify worksheets and cells from the closed, saved OOXML package."""
+    if not worksheet_specs and not cell_specs:
+        return {"worksheets": [], "cells": []}
+    workbook = Path(workbook_path)
+    try:
+        with zipfile.ZipFile(workbook) as package:
+            targets, states = _saved_sheet_targets(package)
+            shared_strings: list[str] = []
+            if "xl/sharedStrings.xml" in package.namelist():
+                shared_root = ET.fromstring(package.read("xl/sharedStrings.xml"))
+                shared_strings = ["".join(item.itertext()) for item in shared_root.findall(f"{{{_MAIN_NS}}}si")]
+            sheet_cells: dict[str, dict[str, ET.Element]] = {}
+            for sheet_name in {spec["sheet"] for spec in cell_specs}:
+                target = targets.get(sheet_name)
+                if not target:
+                    raise VbaVerificationError(f"Saved workbook has no worksheet {sheet_name}")
+                root = ET.fromstring(package.read(target))
+                sheet_cells[sheet_name] = {
+                    node.attrib["r"]: node
+                    for node in root.findall(f".//{{{_MAIN_NS}}}c")
+                    if "r" in node.attrib
+                }
+    except (OSError, KeyError, ValueError, ET.ParseError, zipfile.BadZipFile) as exc:
+        if isinstance(exc, VbaVerificationError):
+            raise
+        raise VbaVerificationError(f"Could not inspect saved worksheet package: {exc}") from exc
+
+    verified_worksheets: list[dict[str, Any]] = []
+    for spec in worksheet_specs:
+        actual_state = states.get(spec["name"])
+        if actual_state is None:
+            raise VbaVerificationError(f"Saved workbook has no worksheet {spec['name']}")
+        if actual_state != spec["visible"]:
+            raise VbaVerificationError(
+                f"Saved worksheet {spec['name']} visibility mismatch: "
+                f"expected={spec['visible']!r}, actual={actual_state!r}"
+            )
+        verified_worksheets.append({"name": spec["name"], "verified": True})
+
+    verified_cells: list[dict[str, Any]] = []
+    for spec in cell_specs:
+        formula, actual = _saved_cell_value(
+            sheet_cells[spec["sheet"]].get(spec["address"]),
+            shared_strings,
+        )
+        expected_formula = spec.get("formula")
+        if expected_formula is not None:
+            if formula != expected_formula:
+                raise VbaVerificationError(
+                    f"Saved cell {spec['sheet']}!{spec['address']} formula mismatch: "
+                    f"expected={expected_formula!r}, actual={formula!r}"
+                )
+        else:
+            expected = spec.get("value")
+            if isinstance(expected, bool):
+                matches = actual is expected
+            elif isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                matches = isinstance(actual, (int, float)) and abs(float(actual) - float(expected)) < 1e-9
+            else:
+                matches = actual == expected
+            if not matches:
+                raise VbaVerificationError(
+                    f"Saved cell {spec['sheet']}!{spec['address']} value mismatch: "
+                    f"expected={expected!r}, actual={actual!r}"
+                )
+        verified_cells.append({"sheet": spec["sheet"], "address": spec["address"], "verified": True})
+    return {"worksheets": verified_worksheets, "cells": verified_cells}
+
+
+def verify_saved_buttons(
+    workbook_path: str | Path,
+    specs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Verify Form Control buttons from the closed, saved OOXML package.
+
+    The Excel worker already checks the live COM objects.  This second check
+    runs after the worker has closed Excel, so a successful result also proves
+    that the button survived serialization into the delivered workbook.
+    """
+    if not specs:
+        return []
+    workbook = Path(workbook_path)
+    try:
+        with zipfile.ZipFile(workbook) as package:
+            vml_by_sheet = _saved_vml_by_sheet(package)
+    except (OSError, KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
+        raise VbaVerificationError(f"Could not inspect saved button package: {exc}") from exc
+
+    verified: list[dict[str, Any]] = []
+    for spec in specs:
+        root = vml_by_sheet.get(spec["sheet"])
+        if root is None:
+            raise VbaVerificationError(f"Saved workbook has no VML controls for sheet {spec['sheet']}")
+        shape = next(
+            (
+                node
+                for node in root.iter(f"{{{_VML_NS}}}shape")
+                if node.attrib.get("id") == spec["name"]
+            ),
+            None,
+        )
+        if shape is None:
+            raise VbaVerificationError(
+                f"Saved workbook has no Form Control button {spec['name']} on sheet {spec['sheet']}"
+            )
+        client_data = shape.find(f"{{{_EXCEL_NS}}}ClientData")
+        if client_data is None:
+            raise VbaVerificationError(f"Saved button {spec['name']} has no Excel ClientData")
+        macro_node = client_data.find(f"{{{_EXCEL_NS}}}FmlaMacro")
+        macro = _normalise_saved_macro("".join(macro_node.itertext()) if macro_node is not None else "")
+        if macro != spec["macro"]:
+            raise VbaVerificationError(
+                f"Saved button {spec['name']} macro mismatch: expected={spec['macro']!r}, actual={macro!r}"
+            )
+        caption = "".join(shape.itertext()).strip()
+        if spec["caption"] not in caption:
+            raise VbaVerificationError(
+                f"Saved button {spec['name']} caption mismatch: expected={spec['caption']!r}"
+            )
+        for key in ("left", "top", "width", "height"):
+            actual = _style_points(shape.attrib.get("style", ""), {
+                "left": "margin-left",
+                "top": "margin-top",
+                "width": "width",
+                "height": "height",
+            }[key])
+            if actual is None or abs(actual - float(spec[key])) > 1.0:
+                raise VbaVerificationError(
+                    f"Saved button {spec['name']} {key} mismatch: "
+                    f"expected={spec[key]!r}, actual={actual!r}"
+                )
+        verified.append({"sheet": spec["sheet"], "name": spec["name"], "verified": True})
+    return verified
+
+
+def apply_script(
+    script: dict[str, Any],
+    workbook_path: str | Path,
+    *,
+    script_dir: str | Path | None = None,
+    sync: bool = False,
+    check: bool = True,
+    timeout: float = DEFAULT_TIMEOUT,
+    trust_workbook: bool = False,
+    policy_path: str | Path | None = None,
+    allow_signature_removal: bool = False,
+    run_test_suite: bool = True,
+    require_tests: bool = True,
+    isolate_tests: bool = True,
+    audit_log: str | Path | None = None,
+    backup_keep: int = 10,
+) -> dict[str, Any]:
+    """Apply modules, worksheets, cells, and buttons in one Excel job."""
+    if not isinstance(script, dict):
+        raise ValueError("Apply script must be a JSON object")
+    allowed_keys = {"modules", "remove_modules", "worksheets", "cells", "buttons"}
+    unknown_keys = sorted(set(script) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            "Unsupported apply script key(s): "
+            + ", ".join(str(key) for key in unknown_keys)
+            + ". Supported keys are modules, remove_modules, worksheets, cells, and buttons."
+        )
+    module_paths = script.get("modules", [])
+    remove_modules = script.get("remove_modules", [])
+    if not isinstance(module_paths, list) or not all(isinstance(item, str) for item in module_paths):
+        raise ValueError("Script modules must be a list of source file paths")
+    if not isinstance(remove_modules, list) or not all(isinstance(item, str) for item in remove_modules):
+        raise ValueError("Script remove_modules must be a list of module filenames")
+    raw_button_specs = script.get("buttons")
+    button_specs = normalize_button_specs(raw_button_specs) if raw_button_specs is not None else None
+    worksheet_specs = normalize_worksheet_specs(script.get("worksheets"))
+    cell_specs = normalize_cell_specs(script.get("cells"))
+    if not module_paths and not remove_modules and button_specs is None and not worksheet_specs and not cell_specs:
+        raise ValueError("Script must contain modules, remove_modules, worksheets, cells, or buttons")
+
+    base = Path(script_dir) if script_dir is not None else Path.cwd()
+    base = base.resolve()
+    workbook = Path(workbook_path)
+    with tempfile.TemporaryDirectory(prefix="usable-xlsm-script-") as raw:
+        source_dir = Path(raw) / "vba"
+        input_dir: Path | None = None
+        if module_paths or remove_modules:
+            source_dir.mkdir()
+            for name, source in extract_vba(workbook).items():
+                (source_dir / Path(name).name).write_text(source, encoding="utf-8", newline="")
+            for raw_path in module_paths:
+                source_path = Path(raw_path)
+                if not source_path.is_absolute():
+                    source_path = base / source_path
+                source_path = source_path.resolve()
+                if source_path.suffix.lower() not in {".bas", ".cls"}:
+                    raise ValueError(f"Script module must be .bas or .cls: {raw_path}")
+                if not source_path.is_file():
+                    raise FileNotFoundError(source_path)
+                shutil.copy2(source_path, source_dir / source_path.name)
+            for name in remove_modules:
+                target = source_dir / Path(name).name
+                if target.suffix.lower() not in {".bas", ".cls"}:
+                    raise ValueError(f"Script can remove only .bas or .cls modules: {name}")
+                if not target.is_file():
+                    raise ValueError(f"Cannot remove module that is not present: {name}")
+                target.unlink()
+            input_dir = source_dir
+        report = update_vba(
+            input_dir,
+            workbook,
+            sync=bool(sync or module_paths or remove_modules),
+            check=check,
+            timeout=timeout,
+            trust_workbook=trust_workbook,
+            policy_path=policy_path,
+            allow_signature_removal=allow_signature_removal,
+            run_test_suite=run_test_suite,
+            require_tests=require_tests,
+            isolate_tests=isolate_tests,
+            audit_log=audit_log,
+            backup_keep=backup_keep,
+            button_specs=button_specs,
+            worksheet_specs=worksheet_specs,
+            cell_specs=cell_specs,
+        )
+    report["script_modules"] = [Path(item).name for item in module_paths]
+    report["script_removed_modules"] = [Path(item).name for item in remove_modules]
+    return report
 
 
 def check_syntax(input_dir: str | Path) -> list[SyntaxIssue]:
@@ -489,6 +981,35 @@ def verify_applied_modules(
             raise VbaVerificationError(f"Staged workbook did not preserve requested source for {key}")
 
 
+def verify_button_macros(workbook_path: str | Path, specs: list[dict[str, Any]]) -> None:
+    """Fail closed when a declared button macro is absent from the VBA project."""
+    if not specs:
+        return
+    modules = {Path(name).stem.casefold(): source for name, source in extract_vba(workbook_path).items()}
+    procedure_pattern = re.compile(
+        r"^\s*(?:(?:Public|Private|Friend)\s+)?"
+        r"(?:Sub|Function|Property\s+(?:Get|Let|Set))\s+([A-Za-z_]\w*)\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for spec in specs:
+        macro = _normalise_saved_macro(spec["macro"])
+        if "." not in macro:
+            raise VbaVerificationError(
+                f"Button {spec['name']} macro must use Module.Procedure syntax: {spec['macro']!r}"
+            )
+        module_name, procedure_name = macro.rsplit(".", 1)
+        source = modules.get(module_name.casefold())
+        if source is None:
+            raise VbaVerificationError(
+                f"Button {spec['name']} refers to missing VBA module {module_name}"
+            )
+        procedures = {match.casefold() for match in procedure_pattern.findall(source)}
+        if procedure_name.casefold() not in procedures:
+            raise VbaVerificationError(
+                f"Button {spec['name']} refers to missing VBA procedure {macro}"
+            )
+
+
 def _require(result: JobResult, message: str) -> Any:
     if not result.ok:
         raise VbaUpdateError(
@@ -499,7 +1020,7 @@ def _require(result: JobResult, message: str) -> Any:
 
 
 def update_vba(
-    input_dir: str | Path,
+    input_dir: str | Path | None,
     workbook_path: str | Path,
     *,
     sync: bool = False,
@@ -516,6 +1037,9 @@ def update_vba(
     backup_keep: int = 10,
     post_macro: str | None = None,
     post_macro_args: list[Any] | None = None,
+    button_specs: Any = None,
+    worksheet_specs: Any = None,
+    cell_specs: Any = None,
 ) -> dict[str, Any]:
     """Atomically promote a verified VBA update from a staging copy.
 
@@ -528,6 +1052,11 @@ def update_vba(
     post_macro_name = str(post_macro or "").strip() or None
     if post_macro_args and not post_macro_name:
         raise ValueError("post_macro_args requires post_macro")
+    normalized_buttons = normalize_button_specs(button_specs) if button_specs is not None else []
+    normalized_worksheets = normalize_worksheet_specs(worksheet_specs)
+    normalized_cells = normalize_cell_specs(cell_specs)
+    if input_dir is None and not normalized_buttons and not normalized_worksheets and not normalized_cells:
+        raise ValueError("Provide --source, --buttons, --worksheets, or --cells")
 
     preflight = require_authorized(
         preflight_workbook(
@@ -538,25 +1067,27 @@ def update_vba(
             allow_signature_removal=allow_signature_removal,
         )
     )
-    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync)
-    current_sources = {Path(name).name: source for name, source in extract_vba(workbook).items()}
-    for name, source in requested_sources.items():
-        if Path(name).suffix.lower() != ".frm":
-            continue
-        key = Path(name).name
-        if key not in current_sources:
-            raise ValueError(f"Cannot create UserForm {key}; its paired .frx designer is required.")
-        if _normalized_module_source(current_sources[key]) != _normalized_module_source(source):
-            raise ValueError(
-                f"Refusing to modify UserForm {key}; plain-text updates cannot preserve its designer."
-            )
+    requested_sources: dict[str, str] = {}
+    if input_dir is not None:
+        requested_sources = validate_vba_modules(input_dir, workbook, sync=sync)
+        current_sources = {Path(name).name: source for name, source in extract_vba(workbook).items()}
+        for name, source in requested_sources.items():
+            if Path(name).suffix.lower() != ".frm":
+                continue
+            key = Path(name).name
+            if key not in current_sources:
+                raise ValueError(f"Cannot create UserForm {key}; its paired .frx designer is required.")
+            if _normalized_module_source(current_sources[key]) != _normalized_module_source(source):
+                raise ValueError(
+                    f"Refusing to modify UserForm {key}; plain-text updates cannot preserve its designer."
+                )
     module_sources = {
         name: source
         for name, source in requested_sources.items()
         if Path(name).suffix.lower() != ".frm"
     }
 
-    if check:
+    if check and input_dir is not None:
         issues = check_directory(input_dir)
         if issues:
             raise VbaSyntaxError(issues)
@@ -577,6 +1108,9 @@ def update_vba(
             "sync": sync,
             "tests_required": bool(run_test_suite and require_tests),
             "post_macro": post_macro_name,
+            "button_count": len(normalized_buttons),
+            "worksheet_count": len(normalized_worksheets),
+            "cell_count": len(normalized_cells),
         },
         audit_log=audit_log,
     )
@@ -595,6 +1129,9 @@ def update_vba(
                 timeout=timeout,
                 modules=module_sources,
                 sync=sync,
+                buttons=normalized_buttons,
+                worksheets=normalized_worksheets,
+                cells=normalized_cells,
                 post_macro=post_macro_name,
                 post_macro_args=post_macro_args or [],
                 security_mode="trusted_execute" if post_macro_name else "disable",
@@ -606,12 +1143,20 @@ def update_vba(
                     error_code=result.error_code or "excel_worker_error",
                 )
 
-            verify_applied_modules(
+            saved_buttons_verified = verify_saved_buttons(staging, normalized_buttons)
+            verify_button_macros(staging, normalized_buttons)
+            saved_objects_verified = verify_saved_workbook_objects(
                 staging,
-                requested_sources,
-                sync=sync,
-                component_manifest=(result.data or {}).get("components"),
+                normalized_worksheets,
+                normalized_cells,
             )
+            if requested_sources:
+                verify_applied_modules(
+                    staging,
+                    requested_sources,
+                    sync=sync,
+                    component_manifest=(result.data or {}).get("components"),
+                )
 
             test_run: TestRun | None = None
             if run_test_suite:
@@ -645,6 +1190,9 @@ def update_vba(
                 details={
                     "tests": len(test_run.results) if test_run else None,
                     "post_macro": post_macro_name,
+                    "button_count": len(normalized_buttons),
+                    "worksheet_count": len(normalized_worksheets),
+                    "cell_count": len(normalized_cells),
                 },
                 audit_log=audit_destination,
             )
@@ -687,6 +1235,11 @@ def update_vba(
             # atomic replacement, so the release remains auditable.
             audit_finalize_error = str(exc)
         report = dict(result.data or {})
+        test_mode = None
+        excel_jobs = 1
+        if test_run is not None:
+            test_mode = "isolated" if isolate_tests else "shared_copy"
+            excel_jobs += len(test_run.results) if isolate_tests else 1
         report.update(
             {
                 "backup": str(backup_path) if backup_path else None,
@@ -696,11 +1249,19 @@ def update_vba(
                 "sha256_after": staged_hash,
                 "audit_log": str(audit_destination),
                 "tests": len(test_run.results) if test_run else None,
+                "test_mode": test_mode,
+                "excel_jobs": excel_jobs,
+                "buttons_saved_verified": saved_buttons_verified,
+                "worksheets_saved_verified": saved_objects_verified["worksheets"],
+                "cells_saved_verified": saved_objects_verified["cells"],
                 "office_version": result.office_version,
                 "pruned_backups": len(removed_backups),
                 "backup_prune_error": prune_error,
                 "audit_finalize_error": audit_finalize_error,
                 "post_macro": post_macro_name,
+                "button_count": len(normalized_buttons),
+                "worksheet_count": len(normalized_worksheets),
+                "cell_count": len(normalized_cells),
             }
         )
         return report

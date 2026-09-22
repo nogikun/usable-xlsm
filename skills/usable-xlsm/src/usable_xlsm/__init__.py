@@ -15,8 +15,15 @@ from .core import (
     verify_clean,
     extract_vba,
     inspect_workbook,
+    apply_script,
     run_macro,
     run_tests,
+    normalize_button_specs,
+    normalize_cell_specs,
+    normalize_worksheet_specs,
+    verify_saved_buttons,
+    verify_saved_workbook_objects,
+    verify_button_macros,
     update_vba,
     validate_vba_modules,
 )
@@ -32,7 +39,7 @@ from .security import (
 from .locking import LockBusyError
 from .support import create_support_bundle
 from ._version import __version__
-from .runner import DEFAULT_TIMEOUT, ExcelJobError, JobResult, excel_pids, run_job
+from .runner import DEFAULT_TIMEOUT, ExcelJobError, JobResult, excel_backend_error, excel_pids, run_job
 from .testing import (
     TEST_PREFIX,
     Discovery,
@@ -75,8 +82,10 @@ __all__ = [
     "check_file",
     "check_syntax",
     "excel_pids",
+    "excel_backend_error",
     "extract_vba",
     "inspect_workbook",
+    "apply_script",
     "main",
     "run_job",
     "Discovery",
@@ -87,6 +96,12 @@ __all__ = [
     "discover",
     "run_macro",
     "run_tests",
+    "normalize_button_specs",
+    "normalize_cell_specs",
+    "normalize_worksheet_specs",
+    "verify_saved_buttons",
+    "verify_saved_workbook_objects",
+    "verify_button_macros",
     "update_vba",
     "validate_vba_modules",
 ]
