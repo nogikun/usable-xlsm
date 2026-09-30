@@ -1,37 +1,24 @@
 # usable-xlsm
 
-Production-oriented tooling for reviewing, updating, and testing VBA in trusted
-Excel macro-enabled workbooks.
+Portable VBA development for Windows, macOS and Linux, with the existing
+dedicated Windows Excel worker for staged updates and isolated runtime tests.
 
-Key properties:
-
-- static security preflight before Excel starts;
-- explicit trust policy or per-invocation attestation;
-- one owned Excel process on a dedicated worker;
-- staged updates with backup, re-extraction verification, isolated tests, and
-  atomic promotion;
-- optional trusted post-update macros run on the staging copy, so workbook
-  objects such as buttons can be installed without a second in-place step;
-- JSON output, stable error codes, privacy-conscious JSONL audit events;
-- no broad Excel process termination;
-- MOTW, XLM, VBA stomping, signatures, UserForms, teardown failures, and cleanup
-  failures handled explicitly.
-
-Install and inspect the command surface:
-
-```powershell
+```text
 uv sync --project skills/usable-xlsm --frozen
+uv run --project skills/usable-xlsm usable-xlsm environment --target-os windows
+uv run --project skills/usable-xlsm usable-xlsm doctor
 uv run --project skills/usable-xlsm usable-xlsm --help
 ```
 
-Start with:
+- Select the workbook user's OS once, separately from the execution host.
+- Extract and edit source on any supported host; use `plan` for compact diffs,
+  single-file `check` for quick feedback, and `--partial` for existing-module updates.
+- Keep Windows COM watchdog, trust policy, staged verification, isolated full
+  tests, signatures, backups, audits and atomic promotion.
+- Use `create` for new sheet/button candidates with a known seed project.
+  Source-only binary building is explicit experimental functionality.
+- Use `check --target macos/libreoffice` for advisory portability findings.
+  Static/structural checks always report `runtime_verified: false`.
 
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm doctor
-uv run --project skills/usable-xlsm usable-xlsm preflight `
-  --workbook book.xlsm --operation edit --policy usable-xlsm.toml
-```
-
-Operational instructions live in `SKILL.md`. Trust policy, dedicated worker,
-and release details are in `references/security.md`,
-`references/setup.md`, and `references/production.md`.
+Operational instructions live in `SKILL.md`. Load the Windows, portable or
+creation reference only when the selected workflow requires it.

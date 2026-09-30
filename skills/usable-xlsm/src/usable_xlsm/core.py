@@ -102,6 +102,7 @@ def validate_vba_modules(
     workbook_path: str | Path,
     *,
     sync: bool = False,
+    partial: bool = False,
 ) -> dict[str, str]:
     """Read source files, checking their names against the workbook.
 
@@ -111,6 +112,8 @@ def validate_vba_modules(
     nothing to recover from.
     """
     source_dir = Path(input_dir)
+    if partial and sync:
+        raise ValueError("--partial and --sync cannot be combined")
     if not source_dir.is_dir():
         raise NotADirectoryError(source_dir)
 
@@ -124,7 +127,7 @@ def validate_vba_modules(
 
     workbook_modules = extract_vba(workbook_path)
     if not sync:
-        missing = set(workbook_modules) - set(source_files)
+        missing = set() if partial else set(workbook_modules) - set(source_files)
         extra = set(source_files) - set(workbook_modules)
         if missing or extra:
             raise VbaModuleMismatchError(missing, extra)
@@ -503,6 +506,7 @@ def update_vba(
     workbook_path: str | Path,
     *,
     sync: bool = False,
+    partial: bool = False,
     check: bool = True,
     backup: bool = True,
     timeout: float = DEFAULT_TIMEOUT,
@@ -523,6 +527,8 @@ def update_vba(
     before Excel is launched. Excel never opens the original for writing.
     """
     workbook = Path(workbook_path)
+    if partial and sync:
+        raise ValueError("--partial and --sync cannot be combined")
     if workbook.suffix.lower() not in {".xlsm", ".xlsb", ".xltm"}:
         raise ValueError(f"Output must be a macro-enabled workbook: {workbook}")
     post_macro_name = str(post_macro or "").strip() or None
@@ -538,7 +544,7 @@ def update_vba(
             allow_signature_removal=allow_signature_removal,
         )
     )
-    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync)
+    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync, partial=partial)
     current_sources = {Path(name).name: source for name, source in extract_vba(workbook).items()}
     for name, source in requested_sources.items():
         if Path(name).suffix.lower() != ".frm":
@@ -575,6 +581,7 @@ def update_vba(
             "trust_source": preflight.trust_source,
             "modules": sorted(Path(name).name for name in requested_sources),
             "sync": sync,
+            "partial": partial,
             "tests_required": bool(run_test_suite and require_tests),
             "post_macro": post_macro_name,
         },

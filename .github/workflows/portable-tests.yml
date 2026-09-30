@@ -1,0 +1,21 @@
+name: Portable static and worker regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --project skills/usable-xlsm --frozen
+      - run: uv run --project skills/usable-xlsm usable-xlsm doctor --mode static
+      - run: uv run --project skills/usable-xlsm python -m unittest discover -s skills/usable-xlsm/tests -v

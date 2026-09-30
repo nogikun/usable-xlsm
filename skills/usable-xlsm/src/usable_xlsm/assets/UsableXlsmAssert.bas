@@ -1,7 +1,8 @@
 Attribute VB_Name = "UsableXlsmAssert"
 Option Explicit
 
-Public Const ASSERT_ERROR As Long = vbObjectError + 9001
+' vbObjectError + 9001; literal also works with LibreOffice's VBA compatibility.
+Public Const ASSERT_ERROR As Long = -2147212503
 
 Public Sub Fail(Optional ByVal message As String = "explicit failure")
     Err.Raise ASSERT_ERROR, "Fail", message
