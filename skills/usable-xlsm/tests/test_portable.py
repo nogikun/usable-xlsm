@@ -5,6 +5,7 @@ import json
 import random
 import struct
 import tempfile
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -46,9 +47,18 @@ class PortableTests(unittest.TestCase):
                 self.assertFalse(json.loads(result.output)["runtime_verified"])
 
     def test_doctor_windows_auto_still_requires_excel(self) -> None:
-        with patch("sys.platform", "win32"), patch("sys.modules", {**__import__("sys").modules, "winreg": type("Registry", (), {"HKEY_CURRENT_USER": 1, "OpenKey": staticmethod(lambda *args: (_ for _ in ()).throw(OSError()))})}):
+        registry = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=lambda *args: (_ for _ in ()).throw(OSError()))
+        client = ModuleType("win32com.client")
+        package = ModuleType("win32com")
+        package.client = client
+        with (
+            patch("sys.platform", "win32"),
+            patch.dict("sys.modules", {"winreg": registry, "win32com": package, "win32com.client": client}),
+            patch("usable_xlsm.cli.excel_pids", return_value=set()),
+        ):
             result = CliRunner().invoke(app, ["doctor"])
-        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.exit_code, 1, repr(result.exception))
+        self.assertTrue(result.output, repr(result.exception))
         self.assertFalse(json.loads(result.output)["ok"])
 
     def test_single_file_syntax_error_returns_json(self) -> None:
