@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Production-safe VBA extraction, staged updates, and isolated Excel testing"
 readme = "README.md"
 authors = [
-    { name = "nogikun", email = "ok220075@oks.iput.ac.jp" }
+    { name = "nogikun" }
 ]
 requires-python = ">=3.13"
 dependencies = [
