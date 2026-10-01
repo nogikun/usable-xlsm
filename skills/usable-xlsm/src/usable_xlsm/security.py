@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
+import math
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tomllib
 from typing import Any
 import zipfile
@@ -17,6 +22,7 @@ from oletools.olevba import VBA_Parser
 
 
 SUPPORTED_SUFFIXES = frozenset({".xlsm", ".xlsb", ".xltm"})
+DEFAULT_SCAN_TIMEOUT = 30.0
 
 
 class WorkbookSecurityError(RuntimeError):
@@ -152,6 +158,91 @@ def _signature_flags(workbook: Path) -> tuple[bool, bool]:
     return signed_vba, signed_package
 
 
+def _inspect_macros(workbook: Path, *, allow_scan_failures: bool = False) -> dict:
+    """Run the original full macro inspection inside the disposable scanner."""
+    findings: list[SecurityFinding] = []
+    blockers: list[str] = []
+    has_vba = has_xlm = stomping = False
+    parser: VBA_Parser | None = None
+    try:
+        parser = VBA_Parser(str(workbook))
+        has_vba = bool(parser.detect_vba_macros())
+        try:
+            has_xlm = bool(parser.detect_xlm_macros())
+        except Exception as exc:
+            findings.append(SecurityFinding("xlm_scan_failed", "critical", "XLM scan failed", str(exc)))
+            if not allow_scan_failures:
+                blockers.append("XLM scan could not be completed")
+        try:
+            stomping = bool(parser.detect_vba_stomping()) if has_vba else False
+        except Exception as exc:
+            findings.append(SecurityFinding("stomping_scan_failed", "critical", "VBA stomping scan failed", str(exc)))
+            if not allow_scan_failures:
+                blockers.append("VBA stomping scan could not be completed")
+        try:
+            for kind, keyword, description in parser.analyze_macros(show_decoded_strings=True, deobfuscate=True) or []:
+                normalized = str(kind).lower().replace(" ", "_")
+                severity = "warning" if kind in {"AutoExec", "Suspicious", "IOC"} else "info"
+                findings.append(SecurityFinding(f"olevba_{normalized}", severity, f"{kind}: {keyword}", str(description)))
+        except Exception as exc:
+            findings.append(SecurityFinding("macro_scan_failed", "critical", "Macro analysis failed", str(exc)))
+            if not allow_scan_failures:
+                blockers.append("macro analysis could not be completed")
+    except Exception as exc:
+        findings.append(SecurityFinding("workbook_scan_failed", "critical", "Workbook scan failed", str(exc)))
+        blockers.append("workbook could not be statically inspected")
+    finally:
+        if parser is not None:
+            parser.close()
+    return {"has_vba": has_vba, "has_xlm": has_xlm, "stomping": stomping,
+            "findings": [finding.to_dict() for finding in findings], "blockers": blockers}
+
+
+def _scan_workbook(workbook: Path, policy: TrustPolicy, timeout: float) -> dict:
+    # ponytail: one process per scan; pool only if small-book latency requires it.
+    # Use the real interpreter rather than a Windows venv launcher, which can
+    # leave its Python child running when only the launcher is killed.
+    bootstrap = (
+        "import json,sys; request=json.load(sys.stdin); "
+        "sys.path=request.pop('sys_path'); "
+        "from usable_xlsm._security_worker import scan; scan(request)"
+    )
+    try:
+        process = subprocess.run(
+            [getattr(sys, "_base_executable", sys.executable), "-X", "utf8", "-c", bootstrap],
+            input=json.dumps({"sys_path": sys.path, "workbook": str(workbook.resolve()),
+                              "allow_scan_failures": policy.allow_scan_failures}).encode("utf-8"),
+            capture_output=True, timeout=timeout,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        if process.returncode:
+            raise ValueError(f"scanner exited with code {process.returncode}")
+        result = json.loads(process.stdout.decode("utf-8"))
+        if set(result) != {"has_vba", "has_xlm", "stomping", "findings", "blockers"}:
+            raise ValueError("invalid scanner result fields")
+        if any(type(result[key]) is not bool for key in ("has_vba", "has_xlm", "stomping")):
+            raise ValueError("invalid scanner result flags")
+        if not isinstance(result["findings"], list) or not isinstance(result["blockers"], list):
+            raise ValueError("invalid scanner result lists")
+        for finding in result["findings"]:
+            item = SecurityFinding(**finding)
+            if any(not isinstance(value, str) for value in (item.code, item.severity, item.summary)):
+                raise ValueError("invalid scanner finding")
+            if item.detail is not None and not isinstance(item.detail, str):
+                raise ValueError("invalid scanner finding detail")
+        if any(not isinstance(reason, str) for reason in result["blockers"]):
+            raise ValueError("invalid scanner blocker")
+        return result
+    except subprocess.TimeoutExpired:
+        code, reason = "macro_scan_timeout", f"workbook macro scan exceeded {timeout:g} seconds"
+    except (OSError, ValueError, TypeError) as exc:
+        code, reason = "macro_scan_worker_failed", f"workbook macro scan failed: {exc}"
+    # Unknown XLM/stomping state is always a blocker, even for a policy that
+    # accepts individual detector failures. No partial result authorizes a job.
+    return {"has_vba": False, "has_xlm": False, "stomping": False,
+            "findings": [SecurityFinding(code, "critical", reason).to_dict()], "blockers": [reason]}
+
+
 def preflight_workbook(
     workbook_path: str | Path,
     *,
@@ -159,6 +250,7 @@ def preflight_workbook(
     trust_workbook: bool = False,
     policy_path: str | Path | None = None,
     allow_signature_removal: bool = False,
+    scan_timeout: float = DEFAULT_SCAN_TIMEOUT,
 ) -> PreflightReport:
     """Inspect and authorize a workbook without starting Excel.
 
@@ -167,6 +259,8 @@ def preflight_workbook(
     silently overrides high-risk format findings.
     """
     workbook = Path(workbook_path)
+    if not math.isfinite(scan_timeout) or scan_timeout <= 0:
+        raise ValueError("scan_timeout must be a finite positive number")
     if not workbook.is_file():
         raise FileNotFoundError(workbook)
     if operation not in {"inspect", "edit", "execute"}:
@@ -198,54 +292,10 @@ def preflight_workbook(
         if not (allow_signature_removal or policy.allow_signed_updates):
             blockers.append("editing would invalidate an existing digital signature")
 
-    has_vba = False
-    has_xlm = False
-    stomping = False
-    parser: VBA_Parser | None = None
-    try:
-        parser = VBA_Parser(str(workbook))
-        has_vba = bool(parser.detect_vba_macros())
-        try:
-            has_xlm = bool(parser.detect_xlm_macros())
-        except Exception as exc:
-            findings.append(SecurityFinding("xlm_scan_failed", "critical", "XLM scan failed", str(exc)))
-            if not policy.allow_scan_failures:
-                blockers.append("XLM scan could not be completed")
-
-        try:
-            stomping = bool(parser.detect_vba_stomping()) if has_vba else False
-        except Exception as exc:
-            findings.append(
-                SecurityFinding("stomping_scan_failed", "critical", "VBA stomping scan failed", str(exc))
-            )
-            if not policy.allow_scan_failures:
-                blockers.append("VBA stomping scan could not be completed")
-
-        try:
-            for kind, keyword, description in parser.analyze_macros(
-                show_decoded_strings=True,
-                deobfuscate=True,
-            ) or []:
-                normalized = str(kind).lower().replace(" ", "_")
-                severity = "warning" if kind in {"AutoExec", "Suspicious", "IOC"} else "info"
-                findings.append(
-                    SecurityFinding(
-                        f"olevba_{normalized}",
-                        severity,
-                        f"{kind}: {keyword}",
-                        str(description),
-                    )
-                )
-        except Exception as exc:
-            findings.append(SecurityFinding("macro_scan_failed", "critical", "Macro analysis failed", str(exc)))
-            if not policy.allow_scan_failures:
-                blockers.append("macro analysis could not be completed")
-    except Exception as exc:
-        findings.append(SecurityFinding("workbook_scan_failed", "critical", "Workbook scan failed", str(exc)))
-        blockers.append("workbook could not be statically inspected")
-    finally:
-        if parser is not None:
-            parser.close()
+    scan = _scan_workbook(workbook, policy, scan_timeout)
+    has_vba, has_xlm, stomping = (scan[key] for key in ("has_vba", "has_xlm", "stomping"))
+    findings.extend(SecurityFinding(**item) for item in scan["findings"])
+    blockers.extend(scan["blockers"])
 
     if has_xlm:
         findings.append(SecurityFinding("xlm_macro", "critical", "Excel 4.0/XLM macro is present"))
@@ -257,7 +307,7 @@ def preflight_workbook(
         )
         if not policy.allow_vba_stomping:
             blockers.append("VBA stomping was detected")
-    if not has_vba:
+    if not has_vba and not scan["blockers"]:
         findings.append(SecurityFinding("no_vba", "warning", "No VBA macros were detected"))
 
     if operation in {"edit", "execute"} and not trusted:

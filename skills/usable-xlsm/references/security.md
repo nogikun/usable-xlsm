@@ -15,6 +15,18 @@ requires either:
 
 Absence of MOTW is not evidence of trust.
 
+Macro inspection runs in a disposable Python process with a 30-second deadline.
+Timeouts, crashes and malformed scan results block the operation, including
+unchanged updates, even if `allow_scan_failures` accepts individual detector
+errors. No incomplete scan authorizes an Excel job. Hash, MOTW, signature and
+trust-policy checks still run on every invocation; scan results are not cached.
+
+For olevba 0.60.2, string-expression deobfuscation uses only complete logical
+lines containing a double quote or `Chr` (case-insensitive). These cover every
+leaf in that version's string-expression grammar. All other detectors receive
+the full original source, including form/XLM/p-code strings. A different olevba
+version uses its unfiltered decoder until its grammar is reviewed.
+
 ## Policy file
 
 ```toml
