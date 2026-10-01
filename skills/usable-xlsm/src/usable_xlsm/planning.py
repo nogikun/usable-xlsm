@@ -4,7 +4,7 @@ from difflib import unified_diff
 from pathlib import Path
 import re
 
-from .core import _normalized_module_source, extract_vba
+from .core import _normalized_module_source, extract_vba, module_changes, validate_vba_modules
 from .syntax import VBA_SUFFIXES
 from .testing import discover
 
@@ -21,25 +21,23 @@ def read_sources(directory: str | Path) -> dict[str, str]:
     return sources
 
 
-def plan_changes(source: str | Path, workbook: str | Path, *, partial: bool = False, include_diff: bool = False) -> dict:
-    requested = read_sources(source)
+def plan_changes(source: str | Path, workbook: str | Path, *, partial: bool = False, add_only: bool = False, include_diff: bool = False) -> dict:
     current = {Path(name).name: text for name, text in extract_vba(workbook).items()}
-    changed = sorted(name for name in requested.keys() & current.keys() if _normalized_module_source(requested[name]) != _normalized_module_source(current[name]))
-    added = sorted(requested.keys() - current.keys())
-    removed = [] if partial else sorted(current.keys() - requested.keys())
-    unchanged = sorted((requested.keys() & current.keys()) - set(changed))
+    requested = validate_vba_modules(source, workbook, partial=partial, add_only=True,
+        current_sources=current) if add_only else read_sources(source)
+    changes = module_changes(current, requested, partial=partial or add_only)
+    changed, added, removed = (changes[key] for key in ("changed", "added", "removed"))
     blocked = [name for name in changed + added if Path(name).suffix.lower() == ".frm"]
     if partial and added:
         blocked.extend(added)
-    effective = {**current, **requested} if partial else requested
+    effective = {**current, **requested} if partial or add_only else requested
     discovery = discover(effective)
     result = {
-        "ok": not blocked, "partial": partial,
-        "changed": changed, "added": added, "removed": removed, "unchanged": unchanged,
-        "blocked": sorted(set(blocked)), "requires_sync": bool(added or removed),
+        "ok": not blocked, "partial": partial, "add_only": add_only, **changes,
+        "blocked": sorted(set(blocked)), "requires_sync": bool(added or removed) and not add_only,
         "tests": [case.qualified for case in discovery.cases], "skipped_tests": discovery.skipped,
         "runtime_verified": False,
-        "next_step": "Edit only the listed modules. Use update --partial for existing modules; review --sync explicitly for additions/deletions. Run the full test suite before release.",
+        "next_step": "Use update --add-only with this .bas file; existing modules will be preserved." if add_only else "Edit only the listed modules. Use update --partial for existing modules; review --sync explicitly for additions/deletions. Run the full test suite before release.",
     }
     if include_diff:
         result["diff"] = {name: "".join(unified_diff(_normalized_module_source(current.get(name, "")).splitlines(True), _normalized_module_source(requested.get(name, "")).splitlines(True), fromfile=f"before/{name}", tofile=f"after/{name}")) for name in changed + added + removed}

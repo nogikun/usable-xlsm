@@ -143,6 +143,7 @@ class AtomicUpdateTests(unittest.TestCase):
                     workbook,
                     trust_workbook=True,
                     post_macro="Module1.InstallControlButtons",
+                    skip_unchanged=True,
                 )
 
             self.assertEqual(workbook.read_bytes(), b"updated-with-buttons")
