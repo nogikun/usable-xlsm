@@ -32,8 +32,8 @@ class SmallEditsTests(unittest.TestCase):
             book.write_bytes(b"original")
             source.write_text(NEW, encoding="utf-8")
             with (
-                patch("usable_xlsm.core.extract_vba", return_value={"Old.bas": OLD}),
-                patch("usable_xlsm.planning.extract_vba", return_value={"Old.bas": OLD}),
+                patch("usable_xlsm.core.extract_vba", return_value={"Old.bas": OLD}) as read_again,
+                patch("usable_xlsm.planning.extract_vba", return_value={"Old.bas": OLD}) as read_current,
                 patch("usable_xlsm.core.run_job") as start,
             ):
                 result = CliRunner().invoke(app, ["plan", "--add-only", "--source", str(source), "--workbook", str(book), "--diff"])
@@ -43,6 +43,8 @@ class SmallEditsTests(unittest.TestCase):
                 self.assertEqual(report["removed"], [])
                 self.assertFalse(report["requires_sync"])
                 self.assertIn("Answer = 42", report["diff"]["NewModule.bas"])
+                read_current.assert_called_once_with(book)
+                read_again.assert_not_called()
                 for kwargs in ({"partial": True}, {"sync": True}):
                     with self.assertRaises(ValueError):
                         validate_vba_modules(source, book, add_only=True, **kwargs)
@@ -130,7 +132,7 @@ class SmallEditsTests(unittest.TestCase):
             (source / "Old.bas").write_text(OLD.replace("\n", "\r\n"), encoding="utf-8", newline="")
             with (
                 patch("usable_xlsm.core.preflight_workbook", return_value=authorized(book)) as preflight,
-                patch("usable_xlsm.core.extract_vba", return_value={"Old.bas": OLD, "Other.bas": NEW}),
+                patch("usable_xlsm.core.extract_vba", return_value={"Old.bas": OLD, "Other.bas": NEW}) as read_current,
                 patch("usable_xlsm.core.run_job") as worker,
                 patch("usable_xlsm.core.run_tests") as tests,
                 patch("usable_xlsm.core.backup_workbook") as backup,
@@ -144,6 +146,7 @@ class SmallEditsTests(unittest.TestCase):
             self.assertEqual(book.read_bytes(), b"original")
             self.assertIn('"status": "unchanged"', Path(report["audit_log"]).read_text(encoding="utf-8"))
             preflight.assert_called_once()
+            read_current.assert_called_once_with(book)
             worker.assert_not_called()
             tests.assert_not_called()
             backup.assert_not_called()

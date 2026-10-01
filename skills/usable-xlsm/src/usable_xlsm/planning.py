@@ -22,8 +22,9 @@ def read_sources(directory: str | Path) -> dict[str, str]:
 
 
 def plan_changes(source: str | Path, workbook: str | Path, *, partial: bool = False, add_only: bool = False, include_diff: bool = False) -> dict:
-    requested = validate_vba_modules(source, workbook, partial=partial, add_only=True) if add_only else read_sources(source)
     current = {Path(name).name: text for name, text in extract_vba(workbook).items()}
+    requested = validate_vba_modules(source, workbook, partial=partial, add_only=True,
+        current_sources=current) if add_only else read_sources(source)
     changes = module_changes(current, requested, partial=partial or add_only)
     changed, added, removed = (changes[key] for key in ("changed", "added", "removed"))
     blocked = [name for name in changed + added if Path(name).suffix.lower() == ".frm"]

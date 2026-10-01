@@ -105,6 +105,7 @@ def validate_vba_modules(
     sync: bool = False,
     partial: bool = False,
     add_only: bool = False,
+    current_sources: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Read source files, checking their names against the workbook.
 
@@ -112,6 +113,9 @@ def validate_vba_modules(
     a typo in a filename would otherwise silently add a stray module or delete a
     real one, and this runs before Excel opens anything so a mismatch costs
     nothing to recover from.
+
+    Callers may reuse an already extracted snapshot via ``current_sources``.
+    The update transaction still checks the workbook hash before promotion.
     """
     source_dir = Path(input_dir)
     if partial and sync:
@@ -134,7 +138,7 @@ def validate_vba_modules(
     if not source_files:
         raise ValueError(f"No .bas/.cls/.frm files found in {source_dir}")
 
-    workbook_modules = extract_vba(workbook_path)
+    workbook_modules = extract_vba(workbook_path) if current_sources is None else current_sources
     if add_only:
         if source_dir.stem.casefold() in {Path(name).stem.casefold() for name in workbook_modules}:
             raise ValueError(f"Module {source_dir.stem} already exists; --add-only never replaces it")
@@ -490,10 +494,7 @@ def verify_applied_modules(
         }
         missing = expected_editable - actual_editable
         extra = actual_editable - expected_editable
-        if not missing and not extra:
-            missing = set()
-            extra = set()
-        else:
+        if missing or extra:
             raise VbaVerificationError(
                 "Staged editable-module manifest does not match: "
                 f"missing={sorted(missing)}, extra={sorted(extra)}"
@@ -571,8 +572,9 @@ def update_vba(
             allow_signature_removal=allow_signature_removal,
         )
     )
-    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync, partial=partial, add_only=add_only)
     current_sources = {Path(name).name: source for name, source in extract_vba(workbook).items()}
+    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync, partial=partial,
+        add_only=add_only, current_sources=current_sources)
     changes = module_changes(current_sources, requested_sources, partial=partial or add_only)
     for name, source in requested_sources.items():
         if Path(name).suffix.lower() != ".frm":
