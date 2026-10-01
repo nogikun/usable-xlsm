@@ -22,6 +22,11 @@ from .runner import DEFAULT_TIMEOUT, excel_pids
 from .security import WorkbookSecurityError, preflight_workbook
 from .support import create_support_bundle
 from .syntax import VbaSyntaxError
+from .syntax import check_file
+from .environment import TargetOS, capabilities, static_dependencies
+from .planning import plan_changes, portability_issues, read_sources
+from .creation import create_workbook, extract_project
+from .vba_project import project_bytes, write_new
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -39,7 +44,17 @@ def _coerce(value: str) -> object:
 
 
 @app.command("doctor")
-def doctor_command() -> None:
+def doctor_command(
+    mode: str = typer.Option("auto", "--mode", help="auto, static, or excel; auto preserves the Windows Excel check."),
+) -> None:
+    if mode not in {"auto", "static", "excel"}:
+        raise typer.BadParameter("Choose auto, static, or excel")
+    if mode == "static" or (mode == "auto" and sys.platform != "win32"):
+        dependencies = static_dependencies()
+        _dump({"ok": all(dependencies.values()), "mode": "static", "dependencies": dependencies, **capabilities()})
+        if not all(dependencies.values()):
+            raise typer.Exit(code=1)
+        return
     checks: dict[str, Any] = {"platform": sys.platform}
     settings: list[dict[str, Any]] = []
     if sys.platform == "win32":
@@ -77,6 +92,77 @@ def doctor_command() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command("environment")
+def environment_command(
+    target_os: TargetOS | None = typer.Option(None, "--target-os", help="Workbook user's OS; this does not change the actual execution host."),
+) -> None:
+    if target_os is None and sys.stdin.isatty():
+        target_os = TargetOS(typer.prompt("Target OS (windows / macos / linux)", default=capabilities()["host_os"]))
+    _dump({"ok": True, **capabilities(target_os)})
+
+
+def _require_excel_host() -> None:
+    if sys.platform != "win32":
+        _dump({"ok": False, "error_code": "excel_backend_unavailable", **capabilities()})
+        raise typer.Exit(code=1)
+
+
+@app.command("extract-project")
+def extract_project_command(
+    workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
+    output: Path = typer.Option(..., "--output", "-o", dir_okay=False),
+) -> None:
+    _dump({"ok": True, "output": str(extract_project(workbook, output)), "runtime_verified": False})
+
+
+@app.command("build-project")
+def build_project_command(
+    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    output: Path = typer.Option(..., "--output", "-o", dir_okay=False),
+    document_name: list[str] = typer.Option([], "--document-name"),
+    target_os: TargetOS = typer.Option(TargetOS.windows, "--target-os"),
+    experimental: bool = typer.Option(False, "--experimental"),
+) -> None:
+    if not experimental:
+        raise typer.BadParameter("Supply --experimental; generated binaries still require Excel validation")
+    try:
+        payload, modules = project_bytes(source, documents=document_name or None, target_os=target_os.value)
+        write_new(output, payload)
+    except (ValueError, OSError) as exc:
+        _dump({"ok": False, "error": str(exc)})
+        raise typer.Exit(code=1) from exc
+    _dump({"ok": True, "output": str(output), "modules": sorted(modules), "experimental": True, "runtime_verified": False})
+
+
+@app.command("create")
+def create_command(
+    spec: Path = typer.Option(..., "--spec", exists=True, dir_okay=False),
+    output: Path = typer.Option(..., "--output", "-o", dir_okay=False),
+    vba_project: Path | None = typer.Option(None, "--vba-project", exists=True, dir_okay=False),
+    source: Path | None = typer.Option(None, "--source", "-s", exists=True, file_okay=False),
+    experimental: bool = typer.Option(False, "--experimental"),
+    target_os: TargetOS = typer.Option(TargetOS.windows, "--target-os"),
+) -> None:
+    try:
+        _dump(create_workbook(spec, output, vba_project=vba_project, source=source, experimental=experimental, target_os=target_os.value))
+    except (ValueError, OSError) as exc:
+        _dump({"ok": False, "error": str(exc)})
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("plan")
+def plan_command(
+    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
+    partial: bool = typer.Option(False, "--partial"),
+    diff: bool = typer.Option(False, "--diff", help="Include changed source only when needed."),
+) -> None:
+    report = plan_changes(source, workbook, partial=partial, include_diff=diff)
+    _dump(report)
+    if not report["ok"]:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def preflight(
     workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
@@ -111,19 +197,31 @@ def extract_command(
 
 @app.command("check")
 def check_command(
-    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    source: Path = typer.Option(..., "--source", "-s", exists=True),
+    target: str | None = typer.Option(None, "--target", help="Optional portability advice: windows, macos, linux, libreoffice."),
+    strict_portability: bool = typer.Option(False, "--strict-portability"),
 ) -> None:
-    issues = check_syntax(source)
+    if source.is_file():
+        issues = check_file(source)
+        sources = {source.name: source.read_text(encoding="utf-8")}
+    else:
+        sources = read_sources(source)
+        issues = check_syntax(source)
+    if target and target not in {"windows", "macos", "linux", "libreoffice"}:
+        raise typer.BadParameter("Choose windows, macos, linux, or libreoffice", param_hint="--target")
+    warnings = portability_issues(sources, target) if target else []
     _dump(
         {
-            "ok": not issues,
+            "ok": not issues and not (strict_portability and warnings),
+            "runtime_verified": False,
+            "portability_issues": warnings,
             "issues": [
-                {"file": str(issue.path), "line": issue.line, "column": issue.column, "message": issue.message}
+                {"file": issue.file, "line": issue.line, "column": issue.column, "message": issue.message}
                 for issue in issues
             ],
         }
     )
-    if issues:
+    if issues or (strict_portability and warnings):
         raise typer.Exit(code=1)
 
 
@@ -134,6 +232,7 @@ def update_command(
     trust_workbook: bool = typer.Option(False, "--trust-workbook"),
     policy: Path | None = typer.Option(None, "--policy", exists=True, dir_okay=False),
     sync: bool = typer.Option(False, "--sync"),
+    partial: bool = typer.Option(False, "--partial", help="Apply existing modules only; omitted modules remain unchanged."),
     allow_signature_removal: bool = typer.Option(False, "--allow-signature-removal"),
     test: bool = typer.Option(True, "--test/--no-test"),
     require_tests: bool = typer.Option(True, "--require-tests/--allow-no-tests"),
@@ -152,11 +251,13 @@ def update_command(
         help="Argument for --post-macro; may be repeated and accepts JSON values.",
     ),
 ) -> None:
+    _require_excel_host()
     try:
         report = update_vba(
             source,
             workbook,
             sync=sync,
+            partial=partial,
             trust_workbook=trust_workbook,
             policy_path=policy,
             allow_signature_removal=allow_signature_removal,
@@ -192,6 +293,7 @@ def test_command(
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t"),
     audit_log: Path | None = typer.Option(None, "--audit-log", dir_okay=False),
 ) -> None:
+    _require_excel_host()
     try:
         run = run_tests(
             workbook,
@@ -238,6 +340,7 @@ def run_command(
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t"),
     audit_log: Path | None = typer.Option(None, "--audit-log", dir_okay=False),
 ) -> None:
+    _require_excel_host()
     try:
         result = run_macro(
             workbook,

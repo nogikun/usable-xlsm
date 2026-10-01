@@ -147,7 +147,7 @@ def find_stray_excel(before: set[int]) -> set[int]:
 
 def excel_pids() -> set[int]:
     """PIDs of every Excel process currently running."""
-    return find_stray_excel(set())
+    return find_stray_excel(set()) if sys.platform == "win32" else set()
 
 
 def _run_job_unlocked(
@@ -369,6 +369,11 @@ def run_job(
 ) -> JobResult:
     """Run one owned Excel job while holding the host-wide serialization lock."""
     job_id = str(fields.pop("job_id", uuid.uuid4().hex))
+    if sys.platform != "win32":
+        return JobResult(
+            ok=False, job_id=job_id, error_code="excel_backend_unavailable",
+            error="Automated update/test/run requires Windows desktop Excel. Continue with extract/check/plan/create on this host and hand off runtime validation to a Windows worker.",
+        )
     try:
         with excel_host_lock(job_id):
             return _run_job_unlocked(

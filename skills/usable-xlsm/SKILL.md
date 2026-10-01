@@ -1,154 +1,83 @@
 ---
 name: usable-xlsm
-description: Safely inspect, edit, test, and release VBA and workbook-object changes in trusted .xlsm/.xlsb/.xltm workbooks on a dedicated Windows Excel worker. Use for VBA or macro-enabled workbook development, repair, review, regression testing, and controlled promotion. Do not use for plain .xlsx data work, arbitrary untrusted Office files, or server-side concurrent Office automation.
+description: Inspect, create, repair, and statically validate macro-enabled Excel workbooks and VBA on Windows, macOS, and Linux. Use for .xlsm/.xlsb/.xltm development, incremental VBA changes, portability review, and regression testing. Preserve the dedicated Windows Excel worker for automated editing, macro execution, and atomic release. Do not use for plain .xlsx data work or untrusted macro execution.
 ---
 
 # usable-xlsm
 
-Treat a macro-enabled workbook as executable code. Static reading is safe;
-opening or executing it through Excel requires an explicit trust decision.
+## Select the OS first
 
-## Non-negotiable production rules
+Ask the user once which OS will **use the workbook**: Windows / macOS / Linux.
+Reuse an already stated choice. Separately detect the agent's execution host;
+a Linux agent generating a Windows workbook must use Linux static commands.
+Do not ask again for each revision.
 
-- Never call Excel COM directly. Use `usable-xlsm`; its worker is disposable,
-  detects blocking VBA dialogs, and only terminates the Excel PID it owns.
-- Run on a dedicated Windows account or disposable VM. One worker runs one
-  Excel job at a time, and production commands refuse to start while another
-  Excel process is present.
-- Never infer that a workbook is trusted because it is local or has no Mark of
-  the Web. Use an approved TOML policy, or `--trust-workbook` only after the
-  user explicitly attests to that exact input.
-- Never remove MOTW, weaken Trust Center policy, or add a Trusted Location on
-  the user's behalf.
-- Never edit the original through COM. Updates go to a staging copy, are saved,
-  closed, re-extracted, compared, tested on fresh copies, and only then replace
-  the original atomically. A managed backup and JSONL audit record are created.
-- Signed workbooks are blocked for editing unless signature invalidation is
-  explicitly acknowledged. Production release still requires an approved
-  external re-signing step.
-
-Read [references/security.md](references/security.md) before accepting or
-executing files from a new source. Read
-[references/production.md](references/production.md) when provisioning a
-worker, CI job, signing flow, or monitoring.
-
-## Standard workflow
-
-Run from the repository root.
-
-```powershell
+```text
+uv run --project skills/usable-xlsm usable-xlsm environment --target-os windows
 uv run --project skills/usable-xlsm usable-xlsm doctor
 ```
 
-The worker is ready only when this returns `"ok": true`. `AccessVBOM` belongs
-only on the dedicated automation profile; see
-[references/setup.md](references/setup.md).
+Run from the repository root; use the actual installed skill directory instead
+of `skills/usable-xlsm` when installed elsewhere. Commands shown on one line
+work in PowerShell, bash and zsh.
 
-Inspect without launching Excel:
+| Execution host | Available work | Runtime verification |
+| --- | --- | --- |
+| Windows + desktop Excel | Static work + existing transactional update/test/run | Dedicated Excel worker |
+| macOS | Extraction, source editing, static checks, planning, new XLSM candidates | Manual Mac Excel import/compile/test; Windows worker for automated release |
+| Linux / no Excel | Same static work and candidate creation | Optional LibreOffice compatibility smoke checks; Windows worker for Excel verification |
 
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm preflight `
-  --workbook book.xlsm --operation edit --policy usable-xlsm.toml
-uv run --project skills/usable-xlsm usable-xlsm extract `
-  --workbook book.xlsm --output work/vba
-uv run --project skills/usable-xlsm usable-xlsm check --source work/vba
-```
+`doctor` defaults to the existing Excel readiness check on Windows and a
+successful static capability check on Mac/Linux. `doctor --mode static` is
+also available on Windows without Excel. `doctor --mode excel` failing must
+block Excel jobs only, not extraction, source edits, or candidate creation.
+Changing `--target-os` never enables COM on a non-Windows host.
+Reuse the environment result for later revisions; rerun doctor when the host
+or dependencies change, and before an Excel release.
 
-Edit `.bas` and `.cls` files as ordinary source. Keep filenames equal to VBA
-component names. Existing `.frm` source may be inspected but must not be
-modified: its paired binary designer cannot be round-tripped safely.
+Load only the needed guide:
 
-Promote an update:
+- [windows-workflow.md](references/windows-workflow.md): Windows update/test/run,
+  finalizers, atomic promotion, backups, and failure handling; preserve this path.
+- [portable-workflow.md](references/portable-workflow.md): Mac/Linux handoff,
+  LibreOffice/UNO setup and portability rules from real failure cases.
+- [creation.md](references/creation.md): New sheets/buttons from a seed project
+  or the bundled experimental MS-OVBA compressor/CFB writer.
+- [security.md](references/security.md): Trust and signature rules for a new source.
+- [setup.md](references/setup.md), [production.md](references/production.md):
+  Provisioning a dedicated Windows worker, CI/signing, and monitoring.
+- [vba-notes.md](references/vba-notes.md): Parser, component types, test harness.
 
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm update `
-  --source work/vba --workbook book.xlsm --policy usable-xlsm.toml
-```
+## Cheap revision loop
 
-When the update also needs to create or modify workbook objects that are not
-represented by `.bas`/`.cls` source (for example Form Control buttons), run a
-trusted finalizer on the staging copy as part of the same transaction:
+1. Extract once with `extract --workbook book.xlsm --output work/vba`.
+   Keep the exported sources; do not regenerate the workbook for a small fix.
+2. Run `plan --source work/vba --workbook book.xlsm` to see module names and
+   test discovery without printing all source. Add `--diff` only when needed.
+   If there are no changes and no requested finalizer, skip a redundant update.
+3. Read/edit only the relevant files. Use `check --source work/vba/Module1.bas`
+   for fast feedback; run a full-directory check before handoff/release.
+4. For a folder containing only changed **existing** modules, use
+   `plan --partial` and Windows `update --partial`. Omitted modules are preserved.
+   Use the normal complete export and explicit `--sync` for module additions or
+   deletions; never combine `--partial` and `--sync`.
+5. Use `check --source work/vba --target macos` or `--target libreoffice` for
+   advisory portability findings; `--strict-portability` fails on warnings.
+6. Run focused tests during development if useful, then the full isolated
+   Windows suite before promotion. Do not silently skip tests or weaken trust.
 
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm update `
-  --source work/vba --workbook book.xlsm --policy usable-xlsm.toml `
-  --post-macro Module1.InstallControlButtons
-```
+Static checks validate syntax, not VBA references, compilation or runtime
+behavior. Report which OS/runtime was actually tested and which checks remain.
+Never call a candidate fully verified because static checks or LibreOffice pass.
+Do not repeatedly retry an unsupported backend or install pywin32 on Mac/Linux.
 
-`--post-macro` runs after the VBA source is applied and before static
-verification, isolated tests, and atomic promotion. The original workbook is
-not opened for this step, so a separate `run --in-place` command is not needed.
-Use it only for an explicitly chosen, trusted finalizer; its side effects on
-the staging copy become part of the promoted workbook. Repeated macro
-arguments can be supplied with `--post-macro-arg`.
+## Preserve safety
 
-By default this requires at least one `Public Sub Test_*()`, isolates every test
-on a fresh workbook copy, and refuses promotion on any test, teardown, cleanup,
-integrity, or audit failure. `--allow-no-tests`, `--shared-test-copy`,
-`--no-test`, and `--allow-signature-removal` are release-policy exceptions;
-never add them silently.
-
-Run tests or a macro without changing the original:
-
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm test `
-  --workbook book.xlsm --policy usable-xlsm.toml
-uv run --project skills/usable-xlsm usable-xlsm run `
-  --workbook book.xlsm --macro Module1.MyMacro --policy usable-xlsm.toml
-```
-
-`run` uses a disposable copy by default. `--in-place` is an explicit exception
-for an approved interactive case, not a normal development shortcut. Prefer
-`update --post-macro` when the macro is a deterministic part of the workbook
-release, because it keeps the finalizer inside the staged update transaction.
-
-Confirm no harness or scratch artifacts remain:
-
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm verify --target book.xlsm
-```
-
-Restore the newest managed backup:
-
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm restore --workbook book.xlsm
-```
-
-Create a redacted diagnostic bundle when escalation is needed:
-
-```powershell
-uv run --project skills/usable-xlsm usable-xlsm support-bundle `
-  --workbook book.xlsm --output support.json
-```
-
-The bundle contains versions, process IDs, scratch filenames, and recent
-redacted audit events—not workbook bytes, VBA source, arguments, or cell data.
-
-## VBA test convention
-
-Tests live in standard `.bas` modules:
-
-```vb
-Public Sub Test_AddTwo()
-    AssertEqual AddTwo(2, 3), 5
-End Sub
-```
-
-Optional public, argument-free `TestSetup` and `TestTeardown` procedures run
-around each test. A teardown error fails the case even when the test body
-passed. Assertion helpers are injected only into disposable copies.
-
-## Interpreting failures
-
-- Exit `2`: trust/security preflight blocked the operation.
-- Exit `1`: syntax, Excel, test, verification, cleanup, or audit failure.
-- `excel_host_not_clean`: another Excel process exists; use a clean dedicated
-  worker. Do not kill unidentified processes.
-- `excel_pid_unknown`: recycle the worker host. The watchdog deliberately did
-  not guess which Excel process to terminate.
-- `no_tests`: add a discoverable `Test_*` suite or obtain explicit approval for
-  `--allow-no-tests`.
-- `cleanup_failed`: do not treat the run as successful; inspect with `verify`.
-
-For VBA parsing, component types, lazy compilation, and harness internals, read
-[references/vba-notes.md](references/vba-notes.md).
+Treat workbooks as executable code. Static inspection does not execute macros.
+Use an approved policy or an explicit trust attestation before opening/running
+any input. Never weaken Trust Center, remove MOTW, or add Trusted Locations.
+Never call Excel COM directly; use the disposable, serialized Windows worker.
+Keep updates on staging copies with re-extraction, isolated tests, backup,
+audit and atomic promotion. Preserve signature/UserForm restrictions and
+owned-PID cleanup. Never edit `.frm` text without its binary designer.
+Do not use a portable builder to patch an existing workbook or compiled cache.
