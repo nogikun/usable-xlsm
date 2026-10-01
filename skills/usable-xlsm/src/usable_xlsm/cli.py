@@ -152,12 +152,17 @@ def create_command(
 
 @app.command("plan")
 def plan_command(
-    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    source: Path = typer.Option(..., "--source", "-s", exists=True),
     workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
     partial: bool = typer.Option(False, "--partial"),
+    add_only: bool = typer.Option(False, "--add-only", help="Plan addition of one new standard .bas module."),
     diff: bool = typer.Option(False, "--diff", help="Include changed source only when needed."),
 ) -> None:
-    report = plan_changes(source, workbook, partial=partial, include_diff=diff)
+    try:
+        report = plan_changes(source, workbook, partial=partial, add_only=add_only, include_diff=diff)
+    except (ValueError, OSError) as exc:
+        _dump({"ok": False, "error": str(exc)})
+        raise typer.Exit(code=1) from exc
     _dump(report)
     if not report["ok"]:
         raise typer.Exit(code=1)
@@ -227,12 +232,14 @@ def check_command(
 
 @app.command("update")
 def update_command(
-    source: Path = typer.Option(..., "--source", "-s", exists=True, file_okay=False),
+    source: Path = typer.Option(..., "--source", "-s", exists=True),
     workbook: Path = typer.Option(..., "--workbook", "-w", exists=True, dir_okay=False),
     trust_workbook: bool = typer.Option(False, "--trust-workbook"),
     policy: Path | None = typer.Option(None, "--policy", exists=True, dir_okay=False),
     sync: bool = typer.Option(False, "--sync"),
     partial: bool = typer.Option(False, "--partial", help="Apply existing modules only; omitted modules remain unchanged."),
+    add_only: bool = typer.Option(False, "--add-only", help="Add one new .bas file; refuse existing module names."),
+    skip_unchanged: bool = typer.Option(False, "--skip-unchanged", help="Skip Excel and runtime tests if source is unchanged and no post-macro is requested."),
     allow_signature_removal: bool = typer.Option(False, "--allow-signature-removal"),
     test: bool = typer.Option(True, "--test/--no-test"),
     require_tests: bool = typer.Option(True, "--require-tests/--allow-no-tests"),
@@ -258,6 +265,8 @@ def update_command(
             workbook,
             sync=sync,
             partial=partial,
+            add_only=add_only,
+            skip_unchanged=skip_unchanged,
             trust_workbook=trust_workbook,
             policy_path=policy,
             allow_signature_removal=allow_signature_removal,

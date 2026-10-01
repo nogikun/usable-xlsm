@@ -58,9 +58,14 @@ def _set_module_code(component: Any, source: str) -> None:
 _COMPONENT_TYPES = {".bas": 1, ".cls": 2}
 
 
-def _apply_modules(project: Any, modules: dict[str, str], sync: bool) -> dict[str, list[str]]:
+def _apply_modules(project: Any, modules: dict[str, str], sync: bool, *, add_only: bool = False) -> dict[str, list[str]]:
     components = project.VBComponents
     existing = {component.Name: component for component in components}
+    if add_only:
+        if sync or len(modules) != 1 or any(Path(name).suffix.lower() != ".bas" for name in modules):
+            raise ValueError("Add-only requires one .bas module and cannot use sync")
+        if {Path(name).stem.casefold() for name in modules} & {name.casefold() for name in existing}:
+            raise ValueError("Add-only module already exists")
     report: dict[str, list[str]] = {"updated": [], "added": [], "removed": []}
 
     wanted: dict[str, str] = {}
@@ -83,7 +88,7 @@ def _apply_modules(project: Any, modules: dict[str, str], sync: bool) -> dict[st
                 )
             _set_module_code(existing[name], source)
             report["updated"].append(name)
-        elif sync:
+        elif sync or add_only:
             kind = _COMPONENT_TYPES.get(suffix)
             if kind is None:
                 raise ValueError(f"Cannot create a component for {filename}")
@@ -107,7 +112,7 @@ def _apply_modules(project: Any, modules: dict[str, str], sync: bool) -> dict[st
 
 def _job_update(excel: Any, book: Any, job: dict[str, Any]) -> dict[str, Any]:
     project = book.VBProject
-    report = _apply_modules(project, job["modules"], bool(job.get("sync")))
+    report = _apply_modules(project, job["modules"], bool(job.get("sync")), add_only=bool(job.get("add_only")))
 
     # Run finalizers while the workbook is still the staging copy. This covers
     # workbook objects that cannot be represented by .bas/.cls source, such as

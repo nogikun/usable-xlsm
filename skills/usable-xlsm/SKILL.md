@@ -54,13 +54,18 @@ Load only the needed guide:
    Keep the exported sources; do not regenerate the workbook for a small fix.
 2. Run `plan --source work/vba --workbook book.xlsm` to see module names and
    test discovery without printing all source. Add `--diff` only when needed.
-   If there are no changes and no requested finalizer, skip a redundant update.
+   For a development iteration, `update --skip-unchanged` skips Excel when no
+   source changes or finalizer are requested; it explicitly reports that tests
+   did not run. Omit this option for release verification.
 3. Read/edit only the relevant files. Use `check --source work/vba/Module1.bas`
    for fast feedback; run a full-directory check before handoff/release.
 4. For a folder containing only changed **existing** modules, use
    `plan --partial` and Windows `update --partial`. Omitted modules are preserved.
-   Use the normal complete export and explicit `--sync` for module additions or
-   deletions; never combine `--partial` and `--sync`.
+   For one new standard module, use `plan --add-only --source NewModule.bas`
+   and Windows `update --add-only` with the same file. Existing component names
+   block addition, and all existing sources are verified after saving.
+   Use the complete export and explicit `--sync` for other additions/deletions;
+   never combine `--add-only`, `--partial` or `--sync`.
 5. Use `check --source work/vba --target macos` or `--target libreoffice` for
    advisory portability findings; `--strict-portability` fails on warnings.
 6. Run focused tests during development if useful, then the full isolated

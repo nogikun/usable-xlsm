@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 from typing import Any
@@ -22,7 +23,7 @@ from .security import (
     require_authorized,
     sha256_file,
 )
-from .syntax import VBA_SUFFIXES, SyntaxIssue, VbaSyntaxError, check_directory
+from .syntax import VBA_SUFFIXES, SyntaxIssue, VbaSyntaxError, check_directory, check_source
 from .testing import (
     ASSERT_MODULE,
     ENTRY_POINT,
@@ -103,6 +104,7 @@ def validate_vba_modules(
     *,
     sync: bool = False,
     partial: bool = False,
+    add_only: bool = False,
 ) -> dict[str, str]:
     """Read source files, checking their names against the workbook.
 
@@ -114,10 +116,17 @@ def validate_vba_modules(
     source_dir = Path(input_dir)
     if partial and sync:
         raise ValueError("--partial and --sync cannot be combined")
-    if not source_dir.is_dir():
+    if add_only and (partial or sync):
+        raise ValueError("--add-only cannot be combined with --partial or --sync")
+    if add_only:
+        if not source_dir.is_file() or source_dir.suffix.lower() != ".bas":
+            raise ValueError("--add-only requires one standard .bas module file")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,30}", source_dir.stem):
+            raise ValueError("Use a VBA module name of 1-31 ASCII letters, digits or underscores, starting with a letter")
+    elif not source_dir.is_dir():
         raise NotADirectoryError(source_dir)
 
-    source_files = {
+    source_files = {source_dir.stem + ".bas": source_dir} if add_only else {
         path.name: path
         for path in source_dir.iterdir()
         if path.is_file() and path.suffix.lower() in VBA_SUFFIXES
@@ -126,16 +135,24 @@ def validate_vba_modules(
         raise ValueError(f"No .bas/.cls/.frm files found in {source_dir}")
 
     workbook_modules = extract_vba(workbook_path)
-    if not sync:
+    if add_only:
+        if source_dir.stem.casefold() in {Path(name).stem.casefold() for name in workbook_modules}:
+            raise ValueError(f"Module {source_dir.stem} already exists; --add-only never replaces it")
+    elif not sync:
         missing = set() if partial else set(workbook_modules) - set(source_files)
         extra = set(source_files) - set(workbook_modules)
         if missing or extra:
             raise VbaModuleMismatchError(missing, extra)
 
-    return {
+    sources = {
         name: path.read_text(encoding="utf-8")
         for name, path in sorted(source_files.items())
     }
+    if add_only:
+        attributes = re.findall(r'^Attribute VB_Name = "([^"]+)"', next(iter(sources.values())), re.M)
+        if attributes and attributes != [source_dir.stem]:
+            raise ValueError("Attribute VB_Name must match the source filename")
+    return sources
 
 
 def check_syntax(input_dir: str | Path) -> list[SyntaxIssue]:
@@ -440,6 +457,14 @@ def _normalized_module_source(source: str) -> str:
     return "\n".join(body)
 
 
+def module_changes(current: dict[str, str], requested: dict[str, str], *, partial: bool = False) -> dict[str, list[str]]:
+    changed = sorted(name for name in requested.keys() & current.keys()
+        if _normalized_module_source(requested[name]) != _normalized_module_source(current[name]))
+    return {"changed": changed, "added": sorted(requested.keys() - current.keys()),
+            "removed": [] if partial else sorted(current.keys() - requested.keys()),
+            "unchanged": sorted((requested.keys() & current.keys()) - set(changed))}
+
+
 def verify_applied_modules(
     workbook_path: str | Path,
     expected: dict[str, str],
@@ -507,6 +532,8 @@ def update_vba(
     *,
     sync: bool = False,
     partial: bool = False,
+    add_only: bool = False,
+    skip_unchanged: bool = False,
     check: bool = True,
     backup: bool = True,
     timeout: float = DEFAULT_TIMEOUT,
@@ -544,8 +571,9 @@ def update_vba(
             allow_signature_removal=allow_signature_removal,
         )
     )
-    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync, partial=partial)
+    requested_sources = validate_vba_modules(input_dir, workbook, sync=sync, partial=partial, add_only=add_only)
     current_sources = {Path(name).name: source for name, source in extract_vba(workbook).items()}
+    changes = module_changes(current_sources, requested_sources, partial=partial or add_only)
     for name, source in requested_sources.items():
         if Path(name).suffix.lower() != ".frm":
             continue
@@ -563,7 +591,8 @@ def update_vba(
     }
 
     if check:
-        issues = check_directory(input_dir)
+        issues = check_source(next(iter(requested_sources.values())), filename=Path(input_dir).name,
+            module_name=Path(input_dir).stem, suffix=".bas") if add_only else check_directory(input_dir)
         if issues:
             raise VbaSyntaxError(issues)
 
@@ -582,6 +611,7 @@ def update_vba(
             "modules": sorted(Path(name).name for name in requested_sources),
             "sync": sync,
             "partial": partial,
+            "add_only": add_only,
             "tests_required": bool(run_test_suite and require_tests),
             "post_macro": post_macro_name,
         },
@@ -593,6 +623,14 @@ def update_vba(
             if sha256_file(workbook) != preflight.sha256:
                 raise VbaUpdateError("Workbook changed after preflight; refusing a stale update.")
 
+            if skip_unchanged and not post_macro_name and not any(changes[key] for key in ("changed", "added", "removed")):
+                write_audit_event(workbook, job_id=job_id, action="update", status="unchanged",
+                    sha256_before=preflight.sha256, sha256_after=preflight.sha256, audit_log=audit_destination)
+                return {"status": "unchanged", "changes": changes, "updated": [], "added": [], "removed": [],
+                    "excel_jobs": 0, "runtime_verified": False,
+                    "tests": None, "backup": None, "sha256_before": preflight.sha256,
+                    "sha256_after": preflight.sha256, "job_id": job_id, "audit_log": str(audit_destination)}
+
             backup_path = backup_workbook(workbook) if backup else None
             shutil.copy2(workbook, staging)
             result = run_job(
@@ -602,6 +640,7 @@ def update_vba(
                 timeout=timeout,
                 modules=module_sources,
                 sync=sync,
+                add_only=add_only,
                 post_macro=post_macro_name,
                 post_macro_args=post_macro_args or [],
                 security_mode="trusted_execute" if post_macro_name else "disable",
@@ -615,8 +654,8 @@ def update_vba(
 
             verify_applied_modules(
                 staging,
-                requested_sources,
-                sync=sync,
+                {**current_sources, **requested_sources} if add_only else requested_sources,
+                sync=sync or add_only,
                 component_manifest=(result.data or {}).get("components"),
             )
 
@@ -708,6 +747,8 @@ def update_vba(
                 "backup_prune_error": prune_error,
                 "audit_finalize_error": audit_finalize_error,
                 "post_macro": post_macro_name,
+                "changes": changes,
+                "status": "updated",
             }
         )
         return report

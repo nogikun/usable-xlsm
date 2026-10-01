@@ -50,6 +50,49 @@ Use it only for an explicitly chosen, trusted finalizer; its side effects on
 the staging copy become part of the promoted workbook. Repeated macro
 arguments can be supplied with `--post-macro-arg`.
 
+## Small module changes
+
+For one new standard module, give the UTF-8 `.bas` file directly. Inspect the
+addition without opening Excel, then apply it with the existing transaction:
+
+```powershell
+uv run --project skills/usable-xlsm usable-xlsm plan `
+  --source work/NewModule.bas --workbook book.xlsm --add-only --diff
+uv run --project skills/usable-xlsm usable-xlsm update `
+  --source work/NewModule.bas --workbook book.xlsm --add-only --policy usable-xlsm.toml
+```
+
+`--add-only` accepts exactly one standard `.bas` file. Use a filename stem of
+1–31 ASCII letters, digits or underscores, starting with a letter. An optional
+`Attribute VB_Name` must match it. Any existing component name, ignoring case
+and component type, blocks addition. This mode cannot use `--partial` or
+`--sync`; it does not rewrite or remove existing modules. After saving, both
+the new source and all previously extracted sources are compared, and the
+default full isolated VBA tests still run before promotion.
+
+For a small edit to existing modules, put only the changed files in a source
+directory and use `--partial`. Opt into skipping an unchanged iteration:
+
+```powershell
+uv run --project skills/usable-xlsm usable-xlsm plan `
+  --source work/patch --workbook book.xlsm --partial --diff
+uv run --project skills/usable-xlsm usable-xlsm update `
+  --source work/patch --workbook book.xlsm --partial --skip-unchanged --policy usable-xlsm.toml
+```
+
+`--skip-unchanged` still checks trust, source syntax, the workbook lock and its
+input hash, and writes an audit record. If the compared source has no additions,
+updates or deletions and no `--post-macro` is requested, it returns
+`status: unchanged`, `excel_jobs: 0`, `runtime_verified: false`, `tests: null`.
+It creates no backup, does not save the workbook and does not run runtime tests.
+Source normalization ignores `Attribute` lines, line endings, trailing spaces
+and trailing blank lines. This is a development shortcut, not release evidence;
+omit `--skip-unchanged` when tests must run even without source changes.
+
+The update result's `changes` object lists `added`, `changed`, `removed` and
+`unchanged` source filenames. `plan` lists the same fields at the top level.
+`--add-only` shows no deletions; `--partial` keeps omitted modules unchanged.
+
 By default this requires at least one `Public Sub Test_*()`, isolates every test
 on a fresh workbook copy, and refuses promotion on any test, teardown, cleanup,
 integrity, or audit failure. `--allow-no-tests`, `--shared-test-copy`,
