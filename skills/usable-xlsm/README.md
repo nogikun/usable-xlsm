@@ -19,6 +19,9 @@ uv run --project skills/usable-xlsm usable-xlsm --help
   Source-only binary building is explicit experimental functionality.
 - Use `check --target macos/libreoffice` for advisory portability findings.
   Static/structural checks always report `runtime_verified: false`.
+- For optional LibreOffice save/reopen validation, use the generated-fixture
+  smoke check in [the portable workflow](references/portable-workflow.md#repeatable-savereopen-smoke-check).
+  It rejects Japanese VBA corruption and source loss without changing user workbooks.
 
 Operational instructions live in `SKILL.md`. Load the Windows, portable or
 creation reference only when the selected workflow requires it.
