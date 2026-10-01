@@ -66,6 +66,65 @@ or connection failure is a capability failure, not a failed VBA test. Stop only
 the process/profile created for this session. Never attach to or terminate the
 user's everyday LibreOffice session.
 
+### Repeatable save/reopen smoke check
+
+Use `tests/libreoffice_smoke.py` only with the fresh fixtures it creates. It
+does not accept a user's workbook. The isolated profile prevents interference
+with an existing Office session; it is not a sandbox for untrusted macro code.
+Review the script and bundled assertion/runner modules before running it.
+
+From the repository root on Linux, with LibreOffice and the matching
+`python3-uno` installed:
+
+```text
+uv run --project skills/usable-xlsm python skills/usable-xlsm/tests/libreoffice_smoke.py prepare work/lo-smoke-1
+/usr/bin/python3 skills/usable-xlsm/tests/libreoffice_smoke.py run work/lo-smoke-1
+uv run --project skills/usable-xlsm python skills/usable-xlsm/tests/libreoffice_smoke.py verify work/lo-smoke-1
+```
+
+On Windows, run `prepare` and `verify` with Windows uv. For the middle command,
+use WSL's UNO Python with absolute `/mnt/c/...` paths to both the script and the
+fixture directory, for example (adjust the checkout path):
+
+```text
+wsl.exe -d Ubuntu -- /usr/bin/python3 /mnt/c/Users/takah/Documents/git/usable-xlsm/skills/usable-xlsm/tests/libreoffice_smoke.py run /mnt/c/Users/takah/Documents/git/usable-xlsm/work/lo-smoke-1
+```
+
+Use a new directory for each attempt. `prepare` refuses an existing directory;
+`run` checks input hashes, copies inputs to a temporary directory, disables
+external-document updates, saves separate candidates, and reopens them read-only.
+The supervisor allows 90 seconds and cleans up only its own process group.
+All three commands must succeed. Inspect `verification.json` and `soffice.log`
+on failure; never promote a failed candidate or overwrite the original.
+
+The check covers source-built and reused-project candidates, a nonempty numeric
+sentinel, Japanese text compared to a fixed Python value, formulas, direct cell
+formatting, the registered Form Control macro, and four passing tests plus one
+deliberately failing assertion. It reruns VBA after saving, compares module names
+and normalized source, verifies saved-file hashes, and confirms inputs are unchanged.
+The button check invokes its registered macro; it does not simulate a GUI click.
+
+WSL Ubuntu 22.04 testing on 2026-10-01 found:
+
+| LibreOffice | Initial runtime | Japanese VBA after XLSM save/reopen |
+|---|---|---|
+| 7.3.7.2 | Passed | Corrupted to `?`; rejected |
+| 26.2.5.2 | Passed | Preserved; normalized source comparison passed |
+
+On 7.3.7.2, setting Calc's `Filter/Import/VBA/UseExport` to false did not
+prevent this corruption. On 26.2.5.2, default settings passed. Choose a version
+that passes this check in your environment; these observations do not establish
+a minimum supported version. For Ubuntu 22.04 this comparison used Calc and
+`python3-uno` from the official `jammy-backports` repository.
+
+Even on 26.2.5.2, `vbaProject.bin` bytes and some document-module attributes
+changed. Normalized-source equality ignores `Attribute` lines, line endings,
+trailing spaces and trailing blank lines; it does not prove preservation of
+signatures, references, designers, arbitrary Excel features or binary identity.
+The reused project here is extracted from the generated fixture, not an
+Excel-authored seed. This check stays optional and separate from the portable
+unit suite. Use the existing Windows Excel transaction for production release.
+
 ## Portability rules
 
 - Write one statement per line. In particular, split `Case "x": Proc` into a
