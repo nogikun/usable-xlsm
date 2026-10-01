@@ -7,6 +7,7 @@ from unittest.mock import patch
 import zipfile
 
 from usable_xlsm.security import preflight_workbook
+from usable_xlsm.security import _inspect_macros
 
 
 class FakeParser:
@@ -45,6 +46,10 @@ class SecurityTests(unittest.TestCase):
         return workbook
 
     def setUp(self) -> None:
+        scanner = patch('usable_xlsm.security._scan_workbook',
+                        side_effect=lambda path, policy, timeout: _inspect_macros(path, allow_scan_failures=policy.allow_scan_failures))
+        scanner.start()
+        self.addCleanup(scanner.stop)
         FakeParser.has_vba = True
         FakeParser.has_xlm = False
         FakeParser.stomped = False

@@ -71,6 +71,9 @@ Load only the needed guide:
 6. Run focused tests during development if useful, then the full isolated
    Windows suite before promotion. Do not silently skip tests or weaken trust.
 
+For the repeated-edit workflow and its paired benchmark, see
+[incremental-performance.md](references/incremental-performance.md).
+
 Static checks validate syntax, not VBA references, compilation or runtime
 behavior. Report which OS/runtime was actually tested and which checks remain.
 Never call a candidate fully verified because static checks or LibreOffice pass.
