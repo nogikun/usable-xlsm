@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
+from contextlib import redirect_stdout
 import json
 import random
+import shutil
 import struct
 import tempfile
 from types import ModuleType, SimpleNamespace
@@ -26,6 +28,46 @@ from usable_xlsm.vba_project import _compound_file, _project_property, compress_
 
 
 class PortableTests(unittest.TestCase):
+    def test_libreoffice_gate_rejects_changed_sources_and_files(self) -> None:
+        import libreoffice_smoke as smoke
+
+        with tempfile.TemporaryDirectory() as temp, redirect_stdout(StringIO()):
+            root = Path(temp) / "fixtures"
+            smoke.prepare(root)
+            entries = []
+            for name in smoke.NAMES:
+                saved = root / (Path(name).stem + ".saved.xlsm")
+                shutil.copyfile(root / name, saved)
+                entries.append({"name": name, "ok": True, "saved_sha256": smoke.sha(saved)})
+            report = {"ok": True, "fixtures": entries}
+            smoke.write_json(root / "runtime.json", report)
+            smoke.verify(root)  # Synthetic runtime report; checks only the static gate here.
+
+            saved = root / "generated.saved.xlsm"
+            baseline = saved.read_bytes()
+            saved.write_bytes(baseline + b"changed")
+            with self.assertRaisesRegex(RuntimeError, "changed after runtime"):
+                smoke.verify(root)
+            saved.write_bytes(baseline)
+
+            original = root / smoke.NAMES[0]
+            original_bytes = original.read_bytes()
+            original.write_bytes(original_bytes + b"changed")
+            with self.assertRaisesRegex(RuntimeError, "input changed"):
+                smoke.verify(root)
+            original.write_bytes(original_bytes)
+
+            source = root / "vba" / "Runtime.bas"
+            source.write_text(smoke.RUNTIME.replace(smoke.EXPECTED_TEXT, "????????"), encoding="utf-8")
+            changed = root / "changed.xlsm"
+            create_workbook(root / "workbook.json", changed, source=root / "vba", experimental=True, target_os="linux")
+            shutil.copyfile(changed, saved)
+            entries[0]["saved_sha256"] = smoke.sha(saved)
+            smoke.write_json(root / "runtime.json", report)
+            with self.assertRaisesRegex(RuntimeError, "VBA source changed"):
+                smoke.verify(root)
+            self.assertFalse(json.loads((root / "verification.json").read_text(encoding="utf-8"))["ok"])
+
     def test_target_os_does_not_spoof_host(self) -> None:
         for platform, expected in [("darwin", "macos"), ("linux", "linux")]:
             with patch("sys.platform", platform):
