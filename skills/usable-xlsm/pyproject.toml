@@ -4,7 +4,7 @@ version = "0.3.0"
 description = "Portable VBA development and candidate creation with production-safe Windows Excel releases"
 readme = "README.md"
 authors = [
-    { name = "nogikun", email = "ok220075@oks.iput.ac.jp" }
+    { name = "nogikun" }
 ]
 requires-python = ">=3.13"
 dependencies = [
