@@ -15,7 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tomllib
-from typing import Any
+from typing import Any, Callable
 import zipfile
 
 from oletools.olevba import VBA_Parser
@@ -23,6 +23,12 @@ from oletools.olevba import VBA_Parser
 
 SUPPORTED_SUFFIXES = frozenset({".xlsm", ".xlsb", ".xltm"})
 DEFAULT_SCAN_TIMEOUT = 30.0
+
+
+def _validated_scan_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("scan_timeout must be a finite positive number")
+    return float(value)
 
 
 class WorkbookSecurityError(RuntimeError):
@@ -62,6 +68,7 @@ class TrustPolicy:
     allow_vba_stomping: bool = False
     allow_scan_failures: bool = False
     allow_signed_updates: bool = False
+    scan_timeout_seconds: float = DEFAULT_SCAN_TIMEOUT
 
     @classmethod
     def load(cls, path: str | Path | None) -> "TrustPolicy":
@@ -84,6 +91,7 @@ class TrustPolicy:
             allow_vba_stomping=bool(raw.get("allow_vba_stomping", False)),
             allow_scan_failures=bool(raw.get("allow_scan_failures", False)),
             allow_signed_updates=bool(raw.get("allow_signed_updates", False)),
+            scan_timeout_seconds=_validated_scan_timeout(raw.get("scan_timeout_seconds", DEFAULT_SCAN_TIMEOUT)),
         )
 
     def trusts(self, workbook: Path, digest: str) -> bool:
@@ -109,6 +117,9 @@ class PreflightReport:
     signed_package: bool = False
     findings: list[SecurityFinding] = field(default_factory=list)
     blocking_reasons: list[str] = field(default_factory=list)
+    scan_status: str = "not_run"
+    scan_phase: str | None = None
+    scan_timeout_seconds: float = DEFAULT_SCAN_TIMEOUT
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +137,9 @@ class PreflightReport:
             "signed_package": self.signed_package,
             "blocking_reasons": list(self.blocking_reasons),
             "findings": [finding.to_dict() for finding in self.findings],
+            "scan_status": self.scan_status,
+            "scan_phase": self.scan_phase,
+            "scan_timeout_seconds": self.scan_timeout_seconds,
         }
 
 
@@ -158,27 +172,50 @@ def _signature_flags(workbook: Path) -> tuple[bool, bool]:
     return signed_vba, signed_package
 
 
-def _inspect_macros(workbook: Path, *, allow_scan_failures: bool = False) -> dict:
+def _inspect_macros(
+    workbook: Path, *, allow_scan_failures: bool = False,
+    progress: Callable[[dict], None] | None = None,
+) -> dict:
     """Run the original full macro inspection inside the disposable scanner."""
     findings: list[SecurityFinding] = []
     blockers: list[str] = []
     has_vba = has_xlm = stomping = False
+    vba_checked = False
+    phase = "startup"
+
+    def snapshot() -> dict:
+        return {"has_vba": has_vba, "has_xlm": has_xlm, "stomping": stomping,
+                "vba_checked": vba_checked, "phase": phase,
+                "findings": [finding.to_dict() for finding in findings], "blockers": list(blockers)}
+
+    def stage(name: str) -> None:
+        nonlocal phase
+        phase = name
+        if progress is not None:
+            progress(snapshot())
+
     parser: VBA_Parser | None = None
     try:
+        stage("parser_open")
         parser = VBA_Parser(str(workbook))
+        stage("vba_detection")
         has_vba = bool(parser.detect_vba_macros())
+        vba_checked = True
+        stage("xlm_scan")
         try:
             has_xlm = bool(parser.detect_xlm_macros())
         except Exception as exc:
             findings.append(SecurityFinding("xlm_scan_failed", "critical", "XLM scan failed", str(exc)))
             if not allow_scan_failures:
                 blockers.append("XLM scan could not be completed")
+        stage("stomping_scan")
         try:
             stomping = bool(parser.detect_vba_stomping()) if has_vba else False
         except Exception as exc:
             findings.append(SecurityFinding("stomping_scan_failed", "critical", "VBA stomping scan failed", str(exc)))
             if not allow_scan_failures:
                 blockers.append("VBA stomping scan could not be completed")
+        stage("macro_analysis")
         try:
             for kind, keyword, description in parser.analyze_macros(show_decoded_strings=True, deobfuscate=True) or []:
                 normalized = str(kind).lower().replace(" ", "_")
@@ -193,9 +230,9 @@ def _inspect_macros(workbook: Path, *, allow_scan_failures: bool = False) -> dic
         blockers.append("workbook could not be statically inspected")
     finally:
         if parser is not None:
+            stage("parser_close")
             parser.close()
-    return {"has_vba": has_vba, "has_xlm": has_xlm, "stomping": stomping,
-            "findings": [finding.to_dict() for finding in findings], "blockers": blockers}
+    return {**snapshot(), "scan_status": "complete"}
 
 
 def _scan_workbook(workbook: Path, policy: TrustPolicy, timeout: float) -> dict:
@@ -207,6 +244,10 @@ def _scan_workbook(workbook: Path, policy: TrustPolicy, timeout: float) -> dict:
         "sys.path=request.pop('sys_path'); "
         "from usable_xlsm._security_worker import scan; scan(request)"
     )
+    state = {"has_vba": False, "has_xlm": False, "stomping": False,
+             "vba_checked": False, "phase": "startup", "findings": [], "blockers": []}
+    output = b""
+    status = "failed"
     try:
         process = subprocess.run(
             [getattr(sys, "_base_executable", sys.executable), "-X", "utf8", "-c", bootstrap],
@@ -215,32 +256,57 @@ def _scan_workbook(workbook: Path, policy: TrustPolicy, timeout: float) -> dict:
             capture_output=True, timeout=timeout,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
-        if process.returncode:
-            raise ValueError(f"scanner exited with code {process.returncode}")
-        result = json.loads(process.stdout.decode("utf-8"))
-        if set(result) != {"has_vba", "has_xlm", "stomping", "findings", "blockers"}:
-            raise ValueError("invalid scanner result fields")
-        if any(type(result[key]) is not bool for key in ("has_vba", "has_xlm", "stomping")):
-            raise ValueError("invalid scanner result flags")
-        if not isinstance(result["findings"], list) or not isinstance(result["blockers"], list):
-            raise ValueError("invalid scanner result lists")
-        for finding in result["findings"]:
-            item = SecurityFinding(**finding)
-            if any(not isinstance(value, str) for value in (item.code, item.severity, item.summary)):
-                raise ValueError("invalid scanner finding")
-            if item.detail is not None and not isinstance(item.detail, str):
-                raise ValueError("invalid scanner finding detail")
-        if any(not isinstance(reason, str) for reason in result["blockers"]):
-            raise ValueError("invalid scanner blocker")
-        return result
-    except subprocess.TimeoutExpired:
-        code, reason = "macro_scan_timeout", f"workbook macro scan exceeded {timeout:g} seconds"
-    except (OSError, ValueError, TypeError) as exc:
-        code, reason = "macro_scan_worker_failed", f"workbook macro scan failed: {exc}"
+        output = process.stdout
+        status = "complete" if process.returncode == 0 else "failed"
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run kills and reaps the real interpreter before raising.
+        output = exc.stdout or b""
+        status = "timeout"
+    except OSError:
+        pass
+
+    finished = False
+    try:
+        for line in output.decode("utf-8").splitlines():
+            event = json.loads(line)
+            result = event["state"]
+            expected = {"has_vba", "has_xlm", "stomping", "vba_checked", "phase", "findings", "blockers"}
+            if event["type"] == "result":
+                expected.add("scan_status")
+            if set(result) != expected or not isinstance(result["phase"], str):
+                raise ValueError("invalid scanner result fields")
+            if any(type(result[key]) is not bool for key in ("has_vba", "has_xlm", "stomping", "vba_checked")):
+                raise ValueError("invalid scanner result flags")
+            if not isinstance(result["findings"], list) or not isinstance(result["blockers"], list):
+                raise ValueError("invalid scanner result lists")
+            for finding in result["findings"]:
+                item = SecurityFinding(**finding)
+                if any(not isinstance(value, str) for value in (item.code, item.severity, item.summary)):
+                    raise ValueError("invalid scanner finding")
+                if item.detail is not None and not isinstance(item.detail, str):
+                    raise ValueError("invalid scanner finding detail")
+            if any(not isinstance(reason, str) for reason in result["blockers"]):
+                raise ValueError("invalid scanner blocker")
+            if event["type"] == "result" and result["scan_status"] == "complete":
+                finished = True
+            elif event["type"] != "progress":
+                raise ValueError("invalid scanner event")
+            state.update(result)
+    except (UnicodeError, ValueError, KeyError, TypeError):
+        if status != "timeout":
+            status = "failed"
+    if status == "complete" and (not finished or not state["vba_checked"]):
+        status = "failed"
+    if status == "complete":
+        return state
+    code = "macro_scan_timeout" if status == "timeout" else "macro_scan_worker_failed"
+    reason = (f"workbook macro scan exceeded {timeout:g} seconds during {state['phase']}"
+              if status == "timeout" else f"workbook macro scan failed during {state['phase']}")
     # Unknown XLM/stomping state is always a blocker, even for a policy that
     # accepts individual detector failures. No partial result authorizes a job.
-    return {"has_vba": False, "has_xlm": False, "stomping": False,
-            "findings": [SecurityFinding(code, "critical", reason).to_dict()], "blockers": [reason]}
+    return {**state, "scan_status": status,
+            "findings": [*state["findings"], SecurityFinding(code, "critical", reason).to_dict()],
+            "blockers": [*state["blockers"], reason]}
 
 
 def preflight_workbook(
@@ -250,7 +316,7 @@ def preflight_workbook(
     trust_workbook: bool = False,
     policy_path: str | Path | None = None,
     allow_signature_removal: bool = False,
-    scan_timeout: float = DEFAULT_SCAN_TIMEOUT,
+    scan_timeout: float | None = None,
 ) -> PreflightReport:
     """Inspect and authorize a workbook without starting Excel.
 
@@ -259,14 +325,13 @@ def preflight_workbook(
     silently overrides high-risk format findings.
     """
     workbook = Path(workbook_path)
-    if not math.isfinite(scan_timeout) or scan_timeout <= 0:
-        raise ValueError("scan_timeout must be a finite positive number")
     if not workbook.is_file():
         raise FileNotFoundError(workbook)
     if operation not in {"inspect", "edit", "execute"}:
         raise ValueError(f"Unknown preflight operation: {operation}")
 
     policy = TrustPolicy.load(policy_path)
+    timeout = _validated_scan_timeout(policy.scan_timeout_seconds if scan_timeout is None else scan_timeout)
     digest = sha256_file(workbook)
     policy_trusted = policy.trusts(workbook, digest)
     trusted = bool(trust_workbook or policy_trusted)
@@ -292,7 +357,7 @@ def preflight_workbook(
         if not (allow_signature_removal or policy.allow_signed_updates):
             blockers.append("editing would invalidate an existing digital signature")
 
-    scan = _scan_workbook(workbook, policy, scan_timeout)
+    scan = _scan_workbook(workbook, policy, timeout)
     has_vba, has_xlm, stomping = (scan[key] for key in ("has_vba", "has_xlm", "stomping"))
     findings.extend(SecurityFinding(**item) for item in scan["findings"])
     blockers.extend(scan["blockers"])
@@ -330,6 +395,9 @@ def preflight_workbook(
         signed_package=signed_package,
         findings=findings,
         blocking_reasons=blockers,
+        scan_status=scan["scan_status"],
+        scan_phase=scan["phase"],
+        scan_timeout_seconds=timeout,
     )
 
 

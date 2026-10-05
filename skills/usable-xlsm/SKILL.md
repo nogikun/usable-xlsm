@@ -81,6 +81,12 @@ Do not repeatedly retry an unsupported backend or install pywin32 on Mac/Linux.
 
 ## Preserve safety
 
+On `macro_scan_timeout` or `macro_scan_worker_failed`, retain the blocked
+report and its `scan_phase`; do not bypass preflight to finish an XLSM export.
+The default scan budget remains 30 seconds. See
+[security.md](references/security.md#static-scan-diagnostics) for the policy
+setting and standalone `preflight --scan-timeout` override.
+
 Treat workbooks as executable code. Static inspection does not execute macros.
 Use an approved policy or an explicit trust attestation before opening/running
 any input. Never weaken Trust Center, remove MOTW, or add Trusted Locations.

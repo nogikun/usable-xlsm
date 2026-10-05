@@ -43,11 +43,36 @@ allow_xlm = false
 allow_vba_stomping = false
 allow_scan_failures = false
 allow_signed_updates = false
+scan_timeout_seconds = 30.0
 ```
 
 Relative trusted roots resolve from the policy file's directory. Hash trust is
 stronger for immutable releases; root trust is more convenient for a controlled
 source repository or release share.
+
+## Static scan diagnostics
+
+The JSON report includes `scan_status`, `scan_phase`, and
+`scan_timeout_seconds`. A timeout reports `macro_scan_timeout`, the last
+observed phase (for example `macro_analysis` or `parser_close`), and
+`allowed=false`; `preflight` exits with code 2. Crashes, startup failures, and
+invalid or incomplete results report `macro_scan_worker_failed` and also deny
+authorization. Partial detector flags are diagnostic evidence, not a completed
+security assessment. Decoded string and deobfuscation checks remain enabled.
+
+For a known large project, set `security.scan_timeout_seconds` in the policy
+used by `update`, `test`, or `run`. Standalone `preflight` can override the policy
+value with `--scan-timeout`, for example:
+
+```powershell
+uv run --project skills/usable-xlsm usable-xlsm preflight --workbook book.xlsm --operation inspect --scan-timeout 120
+```
+
+The scan budget must be finite and positive; it is independent of the Excel
+worker's `--timeout`. The default remains 30 seconds. Neither
+`--trust-workbook`, `allow_scan_failures=true`, nor skipping workbook tests
+overrides an incomplete scan. Collect the blocked report and review the
+source, or repeat the full scan with an explicitly larger budget.
 
 ## Hard blockers
 
