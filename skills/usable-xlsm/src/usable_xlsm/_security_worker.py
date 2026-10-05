@@ -24,6 +24,15 @@ def _candidate_vba_strings(code: str):
 def scan(request: dict) -> None:
     # This replacement lives only in this one-shot process, never in the caller.
     olevba.detect_vba_strings = _candidate_vba_strings
+    output = sys.stdout
+
+    def emit(kind: str, state: dict) -> None:
+        output.write(json.dumps({"type": kind, "state": state}, ensure_ascii=True) + "\n")
+        output.flush()
+
     with redirect_stdout(sys.stderr):
-        result = _inspect_macros(Path(request["workbook"]), allow_scan_failures=request["allow_scan_failures"])
-    print(json.dumps(result, ensure_ascii=False), flush=True)
+        result = _inspect_macros(
+            Path(request["workbook"]), allow_scan_failures=request["allow_scan_failures"],
+            progress=lambda state: emit("progress", state),
+        )
+    emit("result", result)

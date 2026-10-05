@@ -175,6 +175,7 @@ def preflight(
     trust_workbook: bool = typer.Option(False, "--trust-workbook"),
     policy: Path | None = typer.Option(None, "--policy", exists=True, dir_okay=False),
     allow_signature_removal: bool = typer.Option(False, "--allow-signature-removal"),
+    scan_timeout: float | None = typer.Option(None, "--scan-timeout", min=0.001),
 ) -> None:
     report = preflight_workbook(
         workbook,
@@ -182,6 +183,7 @@ def preflight(
         trust_workbook=trust_workbook,
         policy_path=policy,
         allow_signature_removal=allow_signature_removal,
+        scan_timeout=scan_timeout,
     )
     _dump(report.to_dict())
     if not report.allowed:
